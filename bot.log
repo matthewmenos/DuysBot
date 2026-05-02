@@ -33487,3 +33487,11 @@ telegram.error.TimedOut: Timed out
 2026-05-02 18:46:21,604 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
 2026-05-02 18:46:31,909 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
 2026-05-02 18:46:38,121 - apscheduler.executors.default - INFO - Running job "start_scheduler (trigger: interval[0:01:00], next run at: 2026-05-02 18:47:38 UTC)" (scheduled at 2026-05-02 18:46:38.092300+00:00)
+2026-05-02 18:46:59,652 - exchange - ERROR - fetch_ticker error: binance does not have market symbol ALICE
+2026-05-02 18:46:59,653 - scheduler - WARNING - Alert: could not fetch ALICE for user 6959276323: binance does not have market symbol ALICE
+2026-05-02 18:47:00,618 - apscheduler.executors.default - INFO - Job "start_scheduler (trigger: interval[0:01:00], next run at: 2026-05-02 18:47:38 UTC)" executed successfully
+2026-05-02 18:47:00,629 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
+2026-05-02 18:47:11,397 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
+2026-05-02 18:47:22,567 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
+2026-05-02 18:47:32,942 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
+2026-05-02 18:47:38,101 - apscheduler.executors.default - INFO - Running job "start_scheduler (trigger: interval[0:01:00], next run at: 2026-05-02 18:48:38 UTC)" (scheduled at 2026-05-02 18:47:38.092300+00:00)
