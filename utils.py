@@ -30,9 +30,9 @@ def require_granted(func):
         keyboard = [[InlineKeyboardButton("💳 Subscribe — $12/month", callback_data="subscribe")]]
         await update.effective_message.reply_text(
             "🔒 <b>Access Required</b>\n\n"
-            "You need an active subscription to use CryptoTradeBot.\n\n"
+            "You need an active subscription to use DUYS Trading Bot.\n\n"
             "  • <b>Pay $12/month</b> via Paystack (card, mobile money, bank transfer)\n"
-            "  • Ask an admin to grant you lifetime access\n\n"
+            "  • Ask an admin @menosaguas to grant you lifetime access\n\n"
             f"Your Telegram ID: <code>{uid}</code>",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML

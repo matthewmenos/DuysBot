@@ -1,4 +1,4 @@
-# CryptoTradeBot 🤖
+# DUYS Trading Bot 🤖
 
 A production-ready Telegram crypto trading bot supporting **Binance**, **Bybit**, **OKX**, and **MEXC** with automated signal-based trading, Paystack subscription payments, and admin lifetime grants.
 
@@ -160,7 +160,7 @@ sudo nano /etc/systemd/system/cryptobot.service
 
 ```ini
 [Unit]
-Description=CryptoTradeBot
+Description=DUYS Trading Bot
 After=network.target
 
 [Service]

@@ -78,6 +78,17 @@ def init_db():
             sent_at    TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS exchange_creds (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL,
+            exchange   TEXT NOT NULL,
+            api_key    TEXT NOT NULL,
+            api_secret TEXT NOT NULL,
+            api_pass   TEXT DEFAULT '',
+            saved_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, exchange)
+        );
+
         CREATE TABLE IF NOT EXISTS price_alerts (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id      INTEGER,
@@ -114,11 +125,58 @@ def grant_user(user_id: int):
 
 
 def save_exchange_creds(user_id: int, exchange: str, api_key: str, api_secret: str, api_pass: str = ""):
+    """Save credentials to both the active user record and the exchange_creds vault."""
     with get_conn() as conn:
+        # Update active exchange on user row
         conn.execute("""
             UPDATE users SET exchange=?, api_key=?, api_secret=?, api_pass=?
             WHERE user_id=?
         """, (exchange, api_key, api_secret, api_pass, user_id))
+        # Upsert into per-exchange vault (so user can switch back without re-entering)
+        conn.execute("""
+            INSERT INTO exchange_creds (user_id, exchange, api_key, api_secret, api_pass)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, exchange) DO UPDATE SET
+                api_key=excluded.api_key,
+                api_secret=excluded.api_secret,
+                api_pass=excluded.api_pass,
+                saved_at=CURRENT_TIMESTAMP
+        """, (user_id, exchange, api_key, api_secret, api_pass))
+
+
+def get_stored_exchanges(user_id: int) -> list:
+    """Return list of exchanges for which this user has stored credentials."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT exchange FROM exchange_creds WHERE user_id=? ORDER BY saved_at DESC",
+            (user_id,)
+        ).fetchall()
+        return [r["exchange"] for r in rows]
+
+
+def get_exchange_creds(user_id: int, exchange: str) -> dict | None:
+    """Retrieve stored credentials for a specific exchange."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT api_key, api_secret, api_pass FROM exchange_creds WHERE user_id=? AND exchange=?",
+            (user_id, exchange)
+        ).fetchone()
+        if row:
+            return {"api_key": row["api_key"], "api_secret": row["api_secret"], "api_pass": row["api_pass"]}
+        return None
+
+
+def switch_exchange(user_id: int, exchange: str) -> bool:
+    """Switch active exchange using already-stored credentials. Returns True if successful."""
+    creds = get_exchange_creds(user_id, exchange)
+    if not creds:
+        return False
+    with get_conn() as conn:
+        conn.execute("""
+            UPDATE users SET exchange=?, api_key=?, api_secret=?, api_pass=?
+            WHERE user_id=?
+        """, (exchange, creds["api_key"], creds["api_secret"], creds["api_pass"], user_id))
+    return True
 
 
 # ── Settings helpers ──────────────────────────────────────────────────────────

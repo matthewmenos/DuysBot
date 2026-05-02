@@ -1,11 +1,10 @@
 """
 exchange.py - Unified exchange connector via ccxt
-Supports: Binance, Bybit, OKX, MEXC
+Supports: Binance, Bybit, OKX, MEXC, KuCoin
 """
 
 import ccxt
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +13,7 @@ SUPPORTED_EXCHANGES = {
     "bybit":   ccxt.bybit,
     "okx":     ccxt.okx,
     "mexc":    ccxt.mexc,
+    "kucoin":  ccxt.kucoin,
 }
 
 EXCHANGE_LABELS = {
@@ -21,35 +21,62 @@ EXCHANGE_LABELS = {
     "bybit":   "Bybit 🔵",
     "okx":     "OKX ⚫",
     "mexc":    "MEXC 🟢",
+    "kucoin":  "KuCoin 🟠",
 }
+
+# Exchanges requiring a passphrase in addition to key + secret
+PASSPHRASE_EXCHANGES = {"okx", "kucoin"}
 
 
 def get_exchange(exchange_id: str, api_key: str, api_secret: str, api_pass: str = "") -> ccxt.Exchange:
-    """Instantiate a ccxt exchange object with user credentials."""
+    """Instantiate a ccxt exchange object with credentials."""
     if exchange_id not in SUPPORTED_EXCHANGES:
         raise ValueError(f"Unsupported exchange: {exchange_id}")
-
-    cls = SUPPORTED_EXCHANGES[exchange_id]
+    cls    = SUPPORTED_EXCHANGES[exchange_id]
     params = {
-        "apiKey": api_key,
-        "secret": api_secret,
+        "apiKey":          api_key,
+        "secret":          api_secret,
         "enableRateLimit": True,
-        "options": {"defaultType": "spot"},
+        "options":         {"defaultType": "spot"},
     }
-    if exchange_id == "okx" and api_pass:
+    if exchange_id in PASSPHRASE_EXCHANGES and api_pass:
         params["password"] = api_pass
-
     return cls(params)
 
 
+def check_key_format(exchange_id: str, api_key: str, api_secret: str, api_pass: str = "") -> dict:
+    """
+    Fast format-only check — no network call, never freezes the bot.
+    Returns {"valid": True} or {"valid": False, "error": "reason"}.
+    Real connectivity is confirmed lazily on first /balance call.
+    """
+    api_key    = (api_key    or "").strip()
+    api_secret = (api_secret or "").strip()
+    api_pass   = (api_pass   or "").strip()
+
+    if not api_key or not api_secret:
+        return {"valid": False, "error": "API key and secret cannot be empty."}
+
+    if len(api_key) < 8 or len(api_secret) < 8:
+        return {"valid": False, "error": "API key or secret is too short — please double-check."}
+
+    if exchange_id in PASSPHRASE_EXCHANGES and not api_pass:
+        label = EXCHANGE_LABELS.get(exchange_id, exchange_id)
+        return {"valid": False, "error": f"{label} requires a passphrase in addition to key and secret."}
+
+    return {"valid": True}
+
+
+# ── Exchange data helpers (synchronous — called from scheduler threads) ───────
+
 def fetch_balance(exchange: ccxt.Exchange) -> dict:
-    """Return USDT and main coin balances."""
+    """Return non-zero coin balances."""
     try:
-        bal = exchange.fetch_balance()
+        bal    = exchange.fetch_balance()
         result = {}
-        for coin in ["USDT", "BTC", "ETH", "BNB", "SOL", "XRP"]:
-            free  = bal.get(coin, {}).get("free", 0) or 0
-            total = bal.get(coin, {}).get("total", 0) or 0
+        for coin in ["USDT", "BTC", "ETH", "BNB", "SOL", "XRP", "USDC"]:
+            free  = float((bal.get(coin) or {}).get("free",  0) or 0)
+            total = float((bal.get(coin) or {}).get("total", 0) or 0)
             if total > 0:
                 result[coin] = {"free": round(free, 6), "total": round(total, 6)}
         return result
@@ -58,16 +85,25 @@ def fetch_balance(exchange: ccxt.Exchange) -> dict:
         raise
 
 
-def fetch_ticker(exchange: ccxt.Exchange, symbol: str) -> dict:
-    """Return last price, 24h change, high, low."""
+def fetch_usdt_balance(exchange: ccxt.Exchange) -> float:
+    """Return free USDT balance — used for trade amount validation."""
     try:
-        ticker = exchange.fetch_ticker(symbol)
+        bal = exchange.fetch_balance()
+        return float((bal.get("USDT") or {}).get("free", 0) or 0)
+    except Exception as e:
+        logger.error(f"fetch_usdt_balance error: {e}")
+        raise
+
+
+def fetch_ticker(exchange: ccxt.Exchange, symbol: str) -> dict:
+    try:
+        t = exchange.fetch_ticker(symbol)
         return {
-            "last":       ticker["last"],
-            "change_pct": round(ticker.get("percentage", 0) or 0, 2),
-            "high":       ticker["high"],
-            "low":        ticker["low"],
-            "volume":     ticker.get("quoteVolume", 0),
+            "last":       t["last"],
+            "change_pct": round(t.get("percentage", 0) or 0, 2),
+            "high":       t["high"],
+            "low":        t["low"],
+            "volume":     t.get("quoteVolume", 0),
         }
     except Exception as e:
         logger.error(f"fetch_ticker error: {e}")
@@ -75,7 +111,6 @@ def fetch_ticker(exchange: ccxt.Exchange, symbol: str) -> dict:
 
 
 def fetch_ohlcv(exchange: ccxt.Exchange, symbol: str, timeframe: str = "1h", limit: int = 100) -> list:
-    """Return OHLCV candles as list of [ts, open, high, low, close, vol]."""
     try:
         return exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     except Exception as e:
@@ -84,17 +119,14 @@ def fetch_ohlcv(exchange: ccxt.Exchange, symbol: str, timeframe: str = "1h", lim
 
 
 def place_market_order(exchange: ccxt.Exchange, symbol: str, side: str, amount_usdt: float) -> dict:
-    """Place a market order. amount_usdt is in quote currency (USDT)."""
     try:
         ticker = exchange.fetch_ticker(symbol)
         price  = ticker["last"]
         qty    = exchange.amount_to_precision(symbol, amount_usdt / price)
-
         if side == "buy":
             order = exchange.create_market_buy_order(symbol, float(qty))
         else:
             order = exchange.create_market_sell_order(symbol, float(qty))
-
         logger.info(f"Order placed: {side} {qty} {symbol} @ ~{price}")
         return order
     except Exception as e:
@@ -103,17 +135,14 @@ def place_market_order(exchange: ccxt.Exchange, symbol: str, side: str, amount_u
 
 
 def close_all_positions(exchange: ccxt.Exchange, open_trades: list) -> list:
-    """Emergency close: sell everything in open_trades for this user."""
     results = []
     for trade in open_trades:
         try:
-            symbol = trade["symbol"]
-            ticker = exchange.fetch_ticker(symbol)
+            ticker = exchange.fetch_ticker(trade["symbol"])
             price  = ticker["last"]
-            # Sell the original buy amount
-            qty = trade["amount"] / trade["entry_price"]
-            order = exchange.create_market_sell_order(symbol, qty)
-            results.append({"symbol": symbol, "status": "closed", "price": price})
+            qty    = trade["amount"] / trade["entry_price"]
+            exchange.create_market_sell_order(trade["symbol"], qty)
+            results.append({"symbol": trade["symbol"], "status": "closed", "price": price})
         except Exception as e:
             results.append({"symbol": trade["symbol"], "status": f"error: {e}"})
     return results

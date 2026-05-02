@@ -1,5 +1,5 @@
 """
-CryptoTradeBot - Telegram Crypto Trading Bot
+DUYS Trading Bot - Telegram Crypto Trading Bot
 Entry point: starts the bot and scheduler
 """
 
@@ -66,7 +66,7 @@ def main():
     from threading import Thread
     Thread(target=run_webhook_server, daemon=True).start()
 
-    logger.info("CryptoTradeBot is starting...")
+    logger.info("DUYS Trading Bot is starting...")
     app.run_polling(drop_pending_updates=True)
 
 

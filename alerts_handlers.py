@@ -36,7 +36,7 @@ async def setalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from utils import PENDING_INPUT
         uid2 = update.effective_user.id
         PENDING_INPUT[uid2] = {"field": "alert_symbol"}
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "🔔 <b>Set a Price Alert</b>\n\n"
             "Reply with your alert in this format:\n"
             "  <code>SYMBOL above PRICE</code>\n"
@@ -53,7 +53,7 @@ async def setalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     condition = args[1].lower()
 
     if condition not in ("above", "below"):
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "❌ Condition must be <code>above</code> or <code>below</code>.\n\n"
             "Example: <code>/setalert BTC/USDT above 70000</code>",
             parse_mode=ParseMode.HTML
@@ -63,7 +63,7 @@ async def setalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target = float(args[2].replace(",", ""))
     except ValueError:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "❌ Price must be a number.\n"
             "Example: <code>/setalert BTC/USDT above 70000</code>",
             parse_mode=ParseMode.HTML
@@ -95,7 +95,7 @@ async def setalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alert_id = add_price_alert(uid, symbol, target, condition, note)
     arrow    = "📈" if condition == "above" else "📉"
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"🔔 <b>Alert Set!</b>\n\n"
         f"Symbol:    <code>{symbol}</code>\n"
         f"Condition: {arrow} price goes <b>{condition}</b> <code>${target:,.6f}</code>\n"
@@ -117,7 +117,7 @@ async def myalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerts = get_active_alerts(uid)
 
     if not alerts:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "🔕 <b>No Active Alerts</b>\n\n"
             "Use /setalert to create a price alert.\n\n"
             "<b>Example:</b>\n"
@@ -138,7 +138,7 @@ async def myalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     lines.append("\n🗑 Remove an alert: <code>/delalert &lt;id&gt;</code>")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 # ── /delalert ─────────────────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ async def delalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
     if not context.args:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "🗑 <b>Delete an Alert</b>\n\n"
             "Usage: <code>/delalert &lt;alert_id&gt;</code>\n"
             "Find your alert IDs with /myalerts.",
@@ -159,16 +159,16 @@ async def delalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         alert_id = int(context.args[0].lstrip("#"))
     except ValueError:
-        await update.message.reply_text("❌ Invalid alert ID. Use /myalerts to see your IDs.")
+        await update.effective_message.reply_text("❌ Invalid alert ID. Use /myalerts to see your IDs.")
         return
 
     if delete_alert(alert_id, uid):
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"✅ Alert <code>#{alert_id}</code> deleted successfully.",
             parse_mode=ParseMode.HTML
         )
     else:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"❌ Alert <code>#{alert_id}</code> not found or doesn't belong to you.",
             parse_mode=ParseMode.HTML
         )
