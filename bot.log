@@ -25167,3 +25167,8 @@ AttributeError: 'sqlite3.Row' object has no attribute 'get'
 2026-05-05 00:29:20,933 | INFO     | httpx | HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
 2026-05-05 00:29:35,153 | INFO     | httpx | HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
 2026-05-05 00:29:45,607 | INFO     | httpx | HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
+2026-05-05 00:29:56,328 | INFO     | httpx | HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
+2026-05-05 00:30:06,599 | INFO     | httpx | HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
+2026-05-05 00:30:17,417 | INFO     | httpx | HTTP Request: POST https://api.telegram.org/bot8591855929:AAHp9sK0df8jX9-iC87CnJkZizZCSAexj00/getUpdates "HTTP/1.1 200 OK"
+2026-05-05 00:30:17,903 | INFO     | apscheduler.executors.default | Running job "start_scheduler (trigger: interval[0:01:00], next run at: 2026-05-05 00:31:17 UTC)" (scheduled at 2026-05-05 00:30:17.889666+00:00)
+2026-05-05 00:30:17,913 | INFO     | apscheduler.executors.default | Job "start_scheduler (trigger: interval[0:01:00], next run at: 2026-05-05 00:31:17 UTC)" executed successfully
