@@ -10,7 +10,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from config import ADMIN_IDS, POPULAR_SYMBOLS, QUOTE_CURRENCY, SUPPORT_CHANNEL_ID
+from config import (
+    ADMIN_IDS, POPULAR_SYMBOLS, QUOTE_CURRENCY, SUPPORT_CHANNEL_ID,
+    FREE_TRIAL_DAYS, MEXC_KEY_EXPIRY_DAYS, CRYPTO_NETWORKS,
+)
 from database import (
     get_user, upsert_user, grant_user, get_settings, update_setting,
     get_trade_history, get_open_trades, get_pnl_summary,
@@ -19,9 +22,18 @@ from database import (
     close_trade, init_db,
     has_active_access, get_subscription_status, activate_subscription,
     record_pending_payment, get_subscription_history, grant_user_lifetime,
-    get_all_subscribers,
+    get_all_subscribers, has_used_trial, activate_trial,
+    record_crypto_payment, confirm_crypto_payment, get_crypto_payment_history,
+    record_mexc_key_saved, get_mexc_key_age_days,
+    get_multi_symbols, set_multi_symbols,
+    get_daily_pnl, get_weekly_pnl,
+    get_pending_confirmation, resolve_trade_confirmation,
 )
 from paystack import initialize_transaction, verify_transaction
+from crypto_payment import verify_usdt_tx, get_payment_instructions, PLAN_PRICES_USDT
+from config import TRONGRID_API_KEY, BSCSCAN_API_KEY
+from referral import get_referral_link, get_referral_stats, resolve_start_referral, reward_referrer
+from logger_setup import report_error_to_admin, init_error_reporter
 from exchange import (
     get_exchange, fetch_balance, fetch_ticker, fetch_ohlcv,
     SUPPORTED_EXCHANGES, EXCHANGE_LABELS, close_all_positions,
@@ -46,17 +58,18 @@ from utils import require_granted, require_creds, is_admin, is_granted
 def get_main_menu(uid: int) -> ReplyKeyboardMarkup:
     """Bottom persistent keyboard — shown to all authorised users."""
     rows = [
-        [KeyboardButton("💰 Balance"),    KeyboardButton("📊 Chart")],
+        [KeyboardButton("📊 Dashboard"),  KeyboardButton("💰 Balance")],
         [KeyboardButton("▶️ Start Trade"), KeyboardButton("⏹ Stop Trade")],
-        [KeyboardButton("📜 History"),    KeyboardButton("📈 PnL")],
-        [KeyboardButton("💊 Health"),     KeyboardButton("📋 Summary")],
+        [KeyboardButton("📊 Chart"),      KeyboardButton("📈 PnL")],
+        [KeyboardButton("📜 History"),    KeyboardButton("💊 Health")],
         [KeyboardButton("🔔 Set Alert"),  KeyboardButton("🔕 My Alerts")],
         [KeyboardButton("⚙️ Settings"),   KeyboardButton("🏦 Exchanges")],
         [KeyboardButton("💳 Subscribe"),  KeyboardButton("🪪 My Status")],
-        [KeyboardButton("📩 Support"),    KeyboardButton("❓ Help")],
+        [KeyboardButton("🔗 Referral"),   KeyboardButton("📩 Support")],
+        [KeyboardButton("❓ Help"),        KeyboardButton("🚨 Panic")],
     ]
     if uid in ADMIN_IDS:
-        rows.append([KeyboardButton("👥 Subscribers"), KeyboardButton("🚨 Panic")])
+        rows.append([KeyboardButton("👥 Subscribers"), KeyboardButton("📴 Close All")])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, persistent=True)
 
 
@@ -79,21 +92,68 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(user.id, user.username or "", is_admin=1 if is_admin(user.id) else 0)
 
     if not is_admin(user.id) and not has_active_access(user.id):
-        keyboard = [
-            [InlineKeyboardButton("💳 Subscribe — $12/month", callback_data="subscribe")],
+        trial_used  = has_used_trial(user.id)
+        active_nets = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
+
+        # ── Build full payment keyboard ───────────────────────────────────────
+        keyboard = []
+
+        # Free trial first (if not used)
+        if not trial_used:
+            keyboard += [[InlineKeyboardButton(
+                f"🆓 Start {FREE_TRIAL_DAYS}-Day Free Trial  (No payment needed)",
+                callback_data="free_trial"
+            )]]
+
+        # Paystack plans
+        keyboard += [
+            [InlineKeyboardButton("── 💳 Pay via Paystack ──────────────", callback_data="noop")],
+            [InlineKeyboardButton("1 Month  $12",          callback_data="pay_1"),
+             InlineKeyboardButton("3 Months $34",          callback_data="pay_3")],
+            [InlineKeyboardButton("6 Months $65 (best)",   callback_data="pay_6")],
         ]
+
+        # Crypto networks (only configured ones)
+        if active_nets:
+            keyboard += [[InlineKeyboardButton(
+                "── 🪙 Pay via Crypto (USDT) ─────────", callback_data="noop"
+            )]]
+            for net_key, net_info in active_nets.items():
+                keyboard += [[InlineKeyboardButton(
+                    f"🪙 {net_info['label']} — USDT",
+                    callback_data=f"crypto_net_{net_key}"
+                )]]
+
+        # ── Build message ─────────────────────────────────────────────────────
+        trial_section = ""
+        if not trial_used:
+            trial_section = (
+                f"\n🆓 <b>Free Trial Available!</b>\n"
+                f"  Enjoy <b>{FREE_TRIAL_DAYS} days</b> of full access — no payment needed.\n"
+                f"  One per account, verified by your Telegram ID.\n"
+            )
+
+        crypto_line = ""
+        if active_nets:
+            nets_str = " • ".join(v["label"] for v in active_nets.values())
+            crypto_line = f"\n<b>🪙 Crypto</b> — USDT via {nets_str}"
+
         await update.effective_message.reply_text(
-            f"👋 Welcome to <b>CryptoTradeBot</b>!\n\n"
-            f"🔒 <b>Subscription Required</b>\n\n"
-            f"Get started with a <b>$12/month</b> subscription via Paystack.\n"
-            f"Accepted: card, mobile money, bank transfer.\n\n"
-            f"Or ask an admin to grant you lifetime access.\n"
-            f"Your Telegram ID: <code>{user.id}</code>",
+            f"👋 Welcome to <b>CryptoTradeBot</b>, {user.first_name}!\n"
+            f"{trial_section}\n"
+            f"<b>📦 Subscription Plans</b>\n"
+            f"  • 1 Month  — $12.00\n"
+            f"  • 3 Months — $34.00  <i>(save $2)</i>\n"
+            f"  • 6 Months — $65.00  <i>(save $7)</i>\n\n"
+            f"<b>💳 Paystack</b> — Card, Mobile Money, Bank Transfer"
+            f"{crypto_line}\n\n"
+            f"Your Telegram ID: <code>{user.id}</code>\n"
+            f"<i>Share this with an admin for lifetime access.</i>",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML
         )
         await update.effective_message.reply_text(
-            "Use the buttons below:",
+            "Choose a payment method above to get started:",
             reply_markup=get_unauth_menu(),
             parse_mode=ParseMode.HTML
         )
@@ -112,17 +172,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Use the buttons below to navigate:"
     )
 
-    # Quick-action inline buttons
+    # Quick-action inline buttons — context-aware based on trading status
+    is_trading  = bool(s and s.get("trading_on"))
+    trade_mode  = s.get("trade_mode", "auto") if s else "auto"
+
     inline_kb = [
-        [InlineKeyboardButton("💰 Balance",     callback_data="cmd_balance"),
-         InlineKeyboardButton("📊 Chart",       callback_data="cmd_chart")],
-        [InlineKeyboardButton("▶️ Start Trade",  callback_data="cmd_start_trade"),
-         InlineKeyboardButton("⏹ Stop Trade",   callback_data="cmd_stop_trade")],
-        [InlineKeyboardButton("📜 History",     callback_data="cmd_history"),
+        [InlineKeyboardButton("📊 Dashboard",   callback_data="cmd_dashboard"),
+         InlineKeyboardButton("💰 Balance",     callback_data="cmd_balance")],
+    ]
+    if is_trading:
+        if trade_mode == "manual":
+            inline_kb += [[InlineKeyboardButton("🟢 Start Now — Buy Now", callback_data="manual_buy_now"),
+                           InlineKeyboardButton("⏹ Stop Trading",         callback_data="cmd_stop_trade")]]
+        else:
+            inline_kb += [[InlineKeyboardButton("💊 Health",              callback_data="cmd_health"),
+                           InlineKeyboardButton("⏹ Stop Trading",         callback_data="cmd_stop_trade")]]
+    else:
+        inline_kb += [[InlineKeyboardButton("▶️ Start Trade",             callback_data="cmd_start_trade"),
+                       InlineKeyboardButton("⚙️ Settings",                callback_data="cmd_settings")]]
+    inline_kb += [
+        [InlineKeyboardButton("📊 Chart",       callback_data="cmd_chart"),
          InlineKeyboardButton("📈 PnL",         callback_data="cmd_pnl")],
-        [InlineKeyboardButton("💊 Health",      callback_data="cmd_health"),
-         InlineKeyboardButton("📋 Summary",     callback_data="cmd_summary")],
-        [InlineKeyboardButton("⚙️ Settings",    callback_data="cmd_settings"),
+        [InlineKeyboardButton("📜 History",     callback_data="cmd_history"),
          InlineKeyboardButton("❓ Help",         callback_data="cmd_help")],
     ]
 
@@ -153,12 +224,36 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bal   = fetch_balance(exch)
         label = EXCHANGE_LABELS.get(user["exchange"], user["exchange"].title())
 
-        lines = [f"💰 <b>Balance — {label}</b>\n"]
+        def fmt(val: float) -> str:
+            """Format with up to 8 significant decimal places, no trailing zeros."""
+            if val == 0:
+                return "0.00"
+            if val >= 1_000:
+                return f"{val:,.2f}"
+            if val >= 1:
+                return f"{val:,.4f}"
+            # Small value — show up to 8 decimal places, strip trailing zeros
+            s = f"{val:.8f}".rstrip("0").rstrip(".")
+            return s
+
+        keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="cmd_balance")]]
+        lines    = [f"💰 <b>Balance — {label}</b>\n"]
         for coin, data in bal.items():
-            lines.append(f"  <b>{coin}</b>:  Free: <code>{data['free']}</code>  |  Total: <code>{data['total']}</code>")
+            free_fmt  = fmt(data["free"])
+            total_fmt = fmt(data["total"])
+            locked    = data["total"] - data["free"]
+            locked_fmt = fmt(locked) if locked > 0 else None
+            line = f"  <b>{coin}</b>\n    Free:   <code>{free_fmt}</code>\n    Total:  <code>{total_fmt}</code>"
+            if locked_fmt:
+                line += f"\n    Locked: <code>{locked_fmt}</code>"
+            lines.append(line)
         if not bal:
             lines.append("  No assets found.")
-        await msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        await msg.edit_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
 
     except ccxt.AuthenticationError:
         await msg.edit_text(
@@ -223,8 +318,8 @@ async def start_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📈 Symbol:          <code>{s['symbol']}</code>\n"
         f"💵 Amount per trade: <code>{trade_amount} USDT</code>\n"
         f"💰 Available USDT:  <code>{usdt_balance:.4f} USDT</code>\n"
-        f"🎯 Take Profit:     <code>{s['take_profit']}%</code>\n"
-        f"🛑 Stop Loss:       <code>{s['stop_loss']}%</code>\n\n"
+        f"🎯 Take Profit:     <code>{s['take_profit']}{'%' if s.get('tp_mode','pct')=='pct' else ' USDT'}</code>\n"
+        f"🛑 Stop Loss:       <code>{s['stop_loss']}{'%' if s.get('sl_mode','pct')=='pct' else ' USDT'}</code>\n\n"
         "The bot will scan for signals every minute. 🤖",
         parse_mode=ParseMode.HTML
     )
@@ -236,8 +331,22 @@ async def start_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     update_setting(uid, "trading_on", 0)
+    open_t   = get_open_trades(uid)
+    keyboard = []
+    if open_t:
+        keyboard += [[
+            InlineKeyboardButton(f"💊 View {len(open_t)} Open Trade(s)", callback_data="cmd_health"),
+            InlineKeyboardButton("🚨 Panic Close", callback_data="cmd_panic"),
+        ]]
+    keyboard += [[
+        InlineKeyboardButton("▶️ Start Again",  callback_data="cmd_start_trade"),
+        InlineKeyboardButton("📈 PnL",          callback_data="cmd_pnl"),
+    ]]
     await update.effective_message.reply_text(
-        "⏹ <b>Auto-trading DISABLED</b>\n\nOpen positions are NOT closed automatically.\nUse /health to review them.",
+        f"⏹ <b>Trading DISABLED</b>\n\n"
+        f"Open positions: <code>{len(open_t)}</code> — they will NOT be closed automatically.\n"
+        f"Use /health to monitor them or /panic to close all.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.HTML
     )
 
@@ -253,21 +362,82 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u   = get_user(uid)
     label = EXCHANGE_LABELS.get(u["exchange"] if u else "binance", "Not set")
 
+    # Get extra settings
+    confirm_on    = bool(s.get("confirm_trades", 0))
+    trailing_on   = bool(s.get("trailing_stop", 0))
+    suggestions_on = bool(s.get("signal_suggestions", 1))
+    multi_syms    = get_multi_symbols(uid)
+
     keyboard = [
-        [InlineKeyboardButton("🔑 Connect Exchange", callback_data="set_exchange")],
-        [InlineKeyboardButton("🎯 Take Profit %",    callback_data="set_tp"),
-         InlineKeyboardButton("🛑 Stop Loss %",      callback_data="set_sl")],
-        [InlineKeyboardButton("💵 Trade Amount",     callback_data="set_amount"),
-         InlineKeyboardButton("🪙 Symbol",           callback_data="set_symbol")],
+        [InlineKeyboardButton("🔑 Connect Exchange",       callback_data="set_exchange")],
+        [InlineKeyboardButton(
+            f"🎯 Take Profit {'%' if s.get('tp_mode','pct')=='pct' else '$'}  ({s['take_profit']}{'%' if s.get('tp_mode','pct')=='pct' else ' USDT'})",
+            callback_data="set_tp"
+        )],
+        [InlineKeyboardButton(
+            f"🛑 Stop Loss {'%' if s.get('sl_mode','pct')=='pct' else '$'}  ({s['stop_loss']}{'%' if s.get('sl_mode','pct')=='pct' else ' USDT'})",
+            callback_data="set_sl"
+        )],
+        [InlineKeyboardButton(
+            f"🔁 TP Mode: {'Percentage %' if s.get('tp_mode','pct')=='pct' else 'Fixed Price $'}",
+            callback_data="toggle_tp_mode"
+        ),
+         InlineKeyboardButton(
+            f"🔁 SL Mode: {'Percentage %' if s.get('sl_mode','pct')=='pct' else 'Fixed Price $'}",
+            callback_data="toggle_sl_mode"
+        )],
+        [InlineKeyboardButton("💵 Trade Amount",           callback_data="set_amount"),
+         InlineKeyboardButton("🪙 Symbol(s)",              callback_data="set_symbol")],
+        [InlineKeyboardButton(
+            f"✅ Confirm Trades" if confirm_on else "⬜ Confirm Trades",
+            callback_data="toggle_confirm"
+        ),
+         InlineKeyboardButton(
+            f"✅ Trailing Stop" if trailing_on else "⬜ Trailing Stop",
+            callback_data="toggle_trailing"
+        )],
+        [InlineKeyboardButton(
+            f"✅ Signal Alerts" if suggestions_on else "⬜ Signal Alerts",
+            callback_data="toggle_suggestions"
+        )],
+        [InlineKeyboardButton(
+            f"🤖 Auto Trade" if s.get("trade_mode","auto") == "auto" else "👆 Manual Trade",
+            callback_data="toggle_trade_mode"
+        )],
     ]
+    # MEXC key expiry warning
+    mexc_warning = ""
+    if u and u["exchange"] == "mexc":
+        age = get_mexc_key_age_days(uid)
+        if age is not None:
+            days_left = MEXC_KEY_EXPIRY_DAYS - age
+            if days_left <= 14:
+                mexc_warning = (
+                    f"\n⚠️ <b>MEXC Key Expiry Warning</b>\n"
+                    f"Your MEXC API key expires in <b>{days_left} day(s)</b>!\n"
+                    f"Renew it on MEXC and update via 🔑 Connect Exchange.\n"
+                )
+            elif days_left <= 0:
+                mexc_warning = (
+                    f"\n🚨 <b>MEXC Key Likely Expired!</b>\n"
+                    f"Your key is {abs(days_left)} days past the 90-day limit.\n"
+                    f"Please renew immediately via 🔑 Connect Exchange.\n"
+                )
+
+    multi_sym_display = ", ".join(multi_syms) if multi_syms else s["symbol"]
     await update.effective_message.reply_text(
         f"⚙️ <b>Your Settings</b>\n\n"
-        f"Exchange:     <code>{label}</code>\n"
-        f"Symbol:       <code>{s['symbol']}</code>\n"
-        f"Trade Amount: <code>{s['trade_amount']} USDT</code>\n"
-        f"Take Profit:  <code>{s['take_profit']}%</code>\n"
-        f"Stop Loss:    <code>{s['stop_loss']}%</code>\n\n"
-        "Tap a button to update:",
+        f"Exchange:          <code>{label}</code>\n"
+        f"Symbol(s):         <code>{multi_sym_display}</code>\n"
+        f"Trade Amount:      <code>{s['trade_amount']} USDT</code>\n"
+        f"Take Profit:       <code>{s['take_profit']}{'%' if s.get('tp_mode','pct')=='pct' else ' USDT (fixed price)'}</code>\n"
+        f"Stop Loss:         <code>{s['stop_loss']}{'%' if s.get('sl_mode','pct')=='pct' else ' USDT (fixed price)'}</code>\n"
+        f"Confirm Trades:    <code>{'ON ✅' if confirm_on else 'OFF ⬜'}</code>\n"
+        f"Trailing Stop:     <code>{'ON ✅' if trailing_on else 'OFF ⬜'}</code>\n"
+        f"Signal Alerts:     <code>{'ON ✅' if suggestions_on else 'OFF ⬜'}</code>\n"
+        f"Trade Mode:        <code>{'🤖 Auto' if s.get('trade_mode','auto')=='auto' else '👆 Manual'}</code>\n"
+        f"{mexc_warning}\n"
+        f"Tap a button to update:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.HTML
     )
@@ -293,7 +463,15 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   PnL: <code>{'+'if pnl>=0 else ''}{pnl:.4f} USDT ({pct:+.2f}%)</code> | {t['status'].upper()}\n"
             f"   {t['opened_at'][:16]}"
         )
-    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    hist_kb = [[
+        InlineKeyboardButton("📈 Full PnL",    callback_data="cmd_pnl"),
+        InlineKeyboardButton("📋 Summary",     callback_data="cmd_summary"),
+    ]]
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(hist_kb),
+        parse_mode=ParseMode.HTML
+    )
 
 
 # ── /chart ────────────────────────────────────────────────────────────────────
@@ -344,7 +522,24 @@ async def chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Confidence: <code>{signal['confidence']}%</code>\n"
             f"📝 {signal['reason'][:300]}"
         )
-        await msg.edit_text(text, parse_mode=ParseMode.HTML)
+        # Context-aware buttons based on signal
+        s2 = get_settings(uid)
+        if signal["action"] == "BUY" and signal["confidence"] >= 50:
+            action_btns = [[
+                InlineKeyboardButton("🚀 Trade This Signal", callback_data="manual_buy_now"),
+                InlineKeyboardButton("🔄 Refresh",           callback_data="cmd_chart"),
+            ]]
+        elif signal["action"] == "SELL":
+            action_btns = [[
+                InlineKeyboardButton("🔕 Set Price Alert",   callback_data="cmd_setalert"),
+                InlineKeyboardButton("🔄 Refresh",           callback_data="cmd_chart"),
+            ]]
+        else:
+            action_btns = [[
+                InlineKeyboardButton("🔄 Refresh Chart",     callback_data="cmd_chart"),
+                InlineKeyboardButton("⚙️ Settings",          callback_data="cmd_settings"),
+            ]]
+        await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(action_btns), parse_mode=ParseMode.HTML)
     except Exception as e:
         await msg.edit_text(f"❌ Chart error:\n<code>{e}</code>", parse_mode=ParseMode.HTML)
 
@@ -366,7 +561,15 @@ async def pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Avg PnL/Trade: <code>{row['avg_pnl_pct']:+.2f}%</code>\n"
         f"Open Trades:   <code>{len(open_t)}</code>"
     )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+    pnl_kb = [[
+        InlineKeyboardButton("📜 History",     callback_data="cmd_history"),
+        InlineKeyboardButton("📋 Summary",     callback_data="cmd_summary"),
+    ]]
+    await update.effective_message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(pnl_kb),
+        parse_mode=ParseMode.HTML
+    )
 
 
 # ── /health ───────────────────────────────────────────────────────────────────
@@ -401,9 +604,20 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{icon} <b>{t['symbol']}</b>\n"
                 f"   Entry: <code>${t['entry_price']:,.4f}</code> → Now: <code>${price:,.4f}</code>\n"
                 f"   PnL: <code>{'+'if pnl_usd>=0 else ''}{pnl_usd:.4f} USDT ({pnl_pct:+.2f}%)</code>\n"
-                f"   TP: <code>{s['take_profit']}%</code> | SL: <code>{s['stop_loss']}%</code>"
+                f"   TP: <code>{s['take_profit']}{'%' if s.get('tp_mode','pct')=='pct' else ' USDT'}</code> | "
+                f"SL: <code>{s['stop_loss']}{'%' if s.get('sl_mode','pct')=='pct' else ' USDT'}</code>"
             )
-        await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        health_kb = [
+            [InlineKeyboardButton("🔄 Refresh",      callback_data="cmd_health"),
+             InlineKeyboardButton("🚨 Panic Close",  callback_data="cmd_panic")],
+            [InlineKeyboardButton("📊 Chart",        callback_data="cmd_chart"),
+             InlineKeyboardButton("📈 PnL",          callback_data="cmd_pnl")],
+        ]
+        await update.effective_message.reply_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(health_kb),
+            parse_mode=ParseMode.HTML
+        )
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Error: <code>{e}</code>", parse_mode=ParseMode.HTML)
 
@@ -549,20 +763,78 @@ async def grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── /panic (admin only) ───────────────────────────────────────────────────────
 
+@require_granted
+@require_creds
 async def panic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Users — close all their own open trades + stop auto-trading."""
+    uid    = update.effective_user.id
+    open_t = get_open_trades(uid)
+
+    if not open_t:
+        update_setting(uid, "trading_on", 0)
+        await update.effective_message.reply_text(
+            "✅ <b>No open trades found.</b>\nAuto-trading has been stopped.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    keyboard = [[
+        InlineKeyboardButton("🚨 YES — Close my trades", callback_data="panic_confirm_user"),
+        InlineKeyboardButton("❌ Cancel",                  callback_data="panic_cancel"),
+    ]]
+    lines = ["🚨 <b>PANIC — Close Your Trades</b>\n\nTrades to be closed at market price:\n"]
+    for t in open_t:
+        lines.append(f"  • <b>{t['symbol']}</b> | Entry: <code>${t['entry_price']:,.4f}</code>")
+    lines.append("\n⚠️ This cannot be undone. Confirm?")
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
+
+
+# ── /close (admin only) — close ALL trades platform-wide ─────────────────────
+
+async def close_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin — emergency close ALL open trades across every user on the platform."""
     uid = update.effective_user.id
     if not is_admin(uid):
         await update.effective_message.reply_text("🚫 Admin only.")
         return
 
-    await update.effective_message.reply_text("🚨 <b>PANIC MODE</b> — Closing ALL open trades...", parse_mode=ParseMode.HTML)
-    users = get_all_trading_users()
-    total_closed = 0
+    all_users  = get_all_trading_users()
+    open_count = sum(len(get_open_trades(u["user_id"])) for u in all_users)
 
-    for user in users:
-        open_t = get_open_trades(user["user_id"])
-        if not open_t:
-            continue
+    if open_count == 0:
+        await update.effective_message.reply_text(
+            "✅ No open trades found across any user.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    keyboard = [[
+        InlineKeyboardButton("🚨 YES — Close ALL platform trades", callback_data="panic_confirm_admin"),
+        InlineKeyboardButton("❌ Cancel", callback_data="panic_cancel"),
+    ]]
+    await update.effective_message.reply_text(
+        f"🚨 <b>ADMIN — Close All Trades</b>\n\n"
+        f"This will close <b>all open trades across all users</b> "
+        f"and stop their auto-trading.\n\n"
+        f"Open trades found: <code>{open_count}</code> across <code>{len(all_users)}</code> user(s)\n\n"
+        f"⚠️ <b>This cannot be undone.</b> Are you sure?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def _execute_user_panic(context, uid: int, notify_msg=None):
+    """Close all open trades for a single user and stop their auto-trading."""
+    user   = get_user(uid)
+    open_t = get_open_trades(uid)
+    closed = 0
+    errors = []
+
+    if open_t:
         try:
             exch    = get_exchange(user["exchange"], user["api_key"], user["api_secret"], user["api_pass"])
             results = close_all_positions(exch, open_t)
@@ -571,24 +843,14 @@ async def panic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pnl_pct = (r["price"] - t["entry_price"]) / t["entry_price"] * 100
                     pnl_usd = t["amount"] * pnl_pct / 100
                     close_trade(t["id"], r["price"], round(pnl_usd, 4), round(pnl_pct, 2))
-                    total_closed += 1
-            # Disable trading for user
-            update_setting(user["user_id"], "trading_on", 0)
-            try:
-                await context.bot.send_message(
-                    chat_id=user["user_id"],
-                    text="🚨 <b>PANIC:</b> Admin has closed all your trades and stopped auto-trading.",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
+                    closed += 1
+                else:
+                    errors.append(f"{t['symbol']}: {r['status']}")
         except Exception as e:
-            logger.error(f"Panic close failed for user {user['user_id']}: {e}")
+            errors.append(str(e))
 
-    await update.effective_message.reply_text(
-        f"✅ Panic complete. <code>{total_closed}</code> trades closed across all users.",
-        parse_mode=ParseMode.HTML
-    )
+    update_setting(uid, "trading_on", 0)
+    return closed, errors
 
 
 
@@ -599,28 +861,84 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     upsert_user(uid, user.username or "")
 
+    # Handle referral from /start ref_XXXXXXXX
+    if context.args:
+        start_param = context.args[0]
+        referrer_id = resolve_start_referral(start_param)
+        if referrer_id and referrer_id != uid:
+            from referral import record_referral, generate_referral_code
+            record_referral(referrer_id, uid, generate_referral_code(referrer_id))
+
     status = get_subscription_status(uid)
     if status["access"]:
-        type_label = "Lifetime (Admin Grant)" if status["type"] == "lifetime" else f"Active until {status['expiry']}"
+        stype = status.get("type", "subscription")
+        if stype == "lifetime":
+            type_label = "♾ Lifetime (Admin Grant)"
+        elif stype == "trial":
+            type_label = f"🆓 Free Trial — {status.get('days_left', '?')} days left"
+        else:
+            type_label = f"📅 Paid — expires {status.get('expiry', '?')}"
         await update.effective_message.reply_text(
             f"✅ <b>You already have active access</b>\n\nPlan: <code>{type_label}</code>\n\nEnjoy trading! 🚀",
             parse_mode=ParseMode.HTML
         )
         return
 
-    keyboard = [
-        [InlineKeyboardButton("1 Month — $12",            callback_data="pay_1")],
-        [InlineKeyboardButton("3 Months — $34 (save $2)", callback_data="pay_3")],
-        [InlineKeyboardButton("6 Months — $65 (save $7)", callback_data="pay_6")],
+    trial_used = has_used_trial(uid)
+
+    # Build keyboard dynamically
+    keyboard = []
+
+    # Section 1: Free trial (only if not used)
+    if not trial_used:
+        keyboard += [[
+            InlineKeyboardButton(
+                f"🆓 {FREE_TRIAL_DAYS}-Day Free Trial  (No payment needed)",
+                callback_data="free_trial"
+            )
+        ]]
+
+    # Section 2: Paystack
+    keyboard += [
+        [InlineKeyboardButton("── 💳 Pay via Paystack ──────────────", callback_data="noop")],
+        [InlineKeyboardButton("1 Month  $12",           callback_data="pay_1"),
+         InlineKeyboardButton("3 Months $34",           callback_data="pay_3")],
+        [InlineKeyboardButton("6 Months $65 (best value)", callback_data="pay_6")],
     ]
+
+    # Section 3: Crypto — one button per configured network
+    active_nets = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
+    if active_nets:
+        keyboard += [[InlineKeyboardButton("── 🪙 Pay via Crypto (USDT) ─────────", callback_data="noop")]]
+        for net_key, net_info in active_nets.items():
+            keyboard += [[InlineKeyboardButton(
+                f"🪙 {net_info['label']} — USDT",
+                callback_data=f"crypto_net_{net_key}"
+            )]]
+
+    trial_section = ""
+    if not trial_used:
+        trial_section = (
+            f"\n🆓 <b>Free Trial Available!</b>\n"
+            f"  Get <b>{FREE_TRIAL_DAYS} days free</b> — no payment needed.\n"
+            f"  One per account, verified by your Telegram ID.\n"
+        )
+
+    crypto_section = ""
+    if active_nets:
+        nets_str = " • ".join(v["label"] for v in active_nets.values())
+        crypto_section = f"<b>🪙 Crypto USDT</b> — {nets_str}\n"
+
     await update.effective_message.reply_text(
-        "💳 <b>Subscribe to CryptoTradeBot</b>\n\n"
-        "Choose a plan to get started:\n\n"
-        "  🔹 <b>1 Month</b>  — $12.00\n"
-        "  🔹 <b>3 Months</b> — $34.00 <i>(save $2)</i>\n"
-        "  🔹 <b>6 Months</b> — $65.00 <i>(save $7)</i>\n\n"
-        "Accepted: 💳 Card • 📱 Mobile Money • 🏦 Bank Transfer\n"
-        "Powered by <b>Paystack</b>",
+        f"🤖 <b>CryptoTradeBot — Subscribe</b>\n"
+        f"{trial_section}\n"
+        f"<b>📦 Plans</b>\n"
+        f"  • 1 Month  — $12.00\n"
+        f"  • 3 Months — $34.00  <i>(save $2)</i>\n"
+        f"  • 6 Months — $65.00  <i>(save $7)</i>\n\n"
+        f"<b>💳 Paystack</b> — Card, Mobile Money, Bank Transfer\n"
+        f"{crypto_section}\n"
+        f"Tap a button to get started:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.HTML
     )
@@ -658,6 +976,92 @@ async def mystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── /subscribers (admin only) ─────────────────────────────────────────────────
 
+async def reply_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Admin only — reply to a user directly from the bot.
+    Usage: /reply <user_id> <message>
+    Also: if admin replies to a forwarded support message, the bot
+          extracts the user_id from the message and forwards the reply.
+    """
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.effective_message.reply_text("🚫 Admin only.")
+        return
+
+    # ── Case 1: /reply <user_id> <message> ───────────────────────────────────
+    if context.args and len(context.args) >= 2:
+        try:
+            target_id = int(context.args[0])
+            message   = " ".join(context.args[1:])
+        except ValueError:
+            await update.effective_message.reply_text(
+                "Usage: <code>/reply &lt;user_id&gt; &lt;message&gt;</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=(
+                    f"📩 <b>Reply from Support</b>\n\n"
+                    f"{message}"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            await update.effective_message.reply_text(
+                f"✅ Reply sent to <code>{target_id}</code>.",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            await update.effective_message.reply_text(
+                f"❌ Failed to send reply: <code>{e}</code>",
+                parse_mode=ParseMode.HTML
+            )
+        return
+
+    # ── Case 2: Admin replies to a forwarded support message ─────────────────
+    # The forwarded support message contains "user_id" in the text
+    reply_to = update.message.reply_to_message if update.message else None
+    if reply_to and reply_to.text:
+        import re
+        # Extract user_id from forwarded support message format:
+        # "👤 User: @username (123456789)"
+        match = re.search(r"\((\d{5,})\)", reply_to.text)
+        if match:
+            target_id = int(match.group(1))
+            message   = " ".join(context.args) if context.args else update.message.text.replace("/reply", "").strip()
+            if not message:
+                await update.effective_message.reply_text(
+                    "Please include a message after /reply, or use <code>/reply &lt;user_id&gt; &lt;message&gt;</code>",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            try:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text=f"📩 <b>Reply from Support</b>\n\n{message}",
+                    parse_mode=ParseMode.HTML
+                )
+                await update.effective_message.reply_text(
+                    f"✅ Reply sent to <code>{target_id}</code>.",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                await update.effective_message.reply_text(
+                    f"❌ Could not send: <code>{e}</code>",
+                    parse_mode=ParseMode.HTML
+                )
+            return
+
+    await update.effective_message.reply_text(
+        "Usage:\n"
+        "  <code>/reply &lt;user_id&gt; &lt;message&gt;</code>\n\n"
+        "Or reply to a forwarded support message with <code>/reply &lt;message&gt;</code>",
+        parse_mode=ParseMode.HTML
+    )
+
+
 async def subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_admin(uid):
@@ -679,33 +1083,176 @@ async def subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+
+# ── /dashboard ────────────────────────────────────────────────────────────────
+
+@require_granted
+@require_creds
+async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid    = update.effective_user.id
+    user   = get_user(uid)
+    s      = get_settings(uid)
+    open_t = get_open_trades(uid)
+    daily  = get_daily_pnl(uid)
+    status = get_subscription_status(uid)
+    symbols = get_multi_symbols(uid) or [s["symbol"]]
+
+    trading_icon = "🟢" if s["trading_on"] else "🔴"
+    label        = EXCHANGE_LABELS.get(user["exchange"], user["exchange"].title())
+
+    # Live balance
+    balance_line = ""
+    try:
+        exch = get_exchange(user["exchange"], user["api_key"], user["api_secret"], user["api_pass"])
+        from exchange import fetch_usdt_balance
+        bal  = fetch_usdt_balance(exch)
+        balance_line = f"💵 Free USDT:   <code>{bal:.4f} USDT</code>\n"
+    except Exception:
+        balance_line = "💵 Balance:     <code>unavailable</code>\n"
+
+    # Open trade summary
+    trade_lines = ""
+    for t in open_t:
+        t = dict(t)
+        trade_lines += f"  • {t['symbol']} | Entry: ${t['entry_price']:,.4f}\n"
+    if not trade_lines:
+        trade_lines = "  None\n"
+
+    # Daily PnL
+    if daily and daily.get("total", 0) > 0:
+        pnl_line = (
+            f"📈 Today PnL:   <code>{'+'if daily['total_pnl']>=0 else ''}"
+            f"{daily['total_pnl']:.4f} USDT</code> "
+            f"({daily['wins']}W / {daily['losses']}L)\n"
+        )
+    else:
+        pnl_line = "📈 Today PnL:   <code>No trades today</code>\n"
+
+    sub_type  = status.get("type", "none")
+    sub_expiry = status.get("expiry", "N/A")
+    sub_line  = f"{'♾' if sub_type=='lifetime' else '📅'} Subscription: <code>{sub_type.title()} — {sub_expiry}</code>\n"
+
+    await update.effective_message.reply_text(
+        f"📊 <b>Dashboard</b>\n\n"
+        f"{trading_icon} Trading:       <code>{'ON' if s['trading_on'] else 'OFF'}</code>\n"
+        f"🏦 Exchange:    <code>{label}</code>\n"
+        f"🪙 Symbol(s):  <code>{', '.join(symbols)}</code>\n"
+        f"{balance_line}"
+        f"🎯 TP:         <code>{s['take_profit']}{'%' if s.get('tp_mode','pct')=='pct' else ' USDT (fixed)'}</code>\n"
+        f"🛑 SL:         <code>{s['stop_loss']}{'%' if s.get('sl_mode','pct')=='pct' else ' USDT (fixed)'}</code>\n"
+        f"💰 Trade Amt:  <code>{s['trade_amount']} USDT</code>\n"
+        f"{sub_line}\n"
+        f"<b>📂 Open Trades ({len(open_t)})</b>\n{trade_lines}\n"
+        f"{pnl_line}",
+        parse_mode=ParseMode.HTML
+    )
+
+
+# ── /broadcast (admin only) ───────────────────────────────────────────────────
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.effective_message.reply_text("🚫 Admin only.")
+        return
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Usage: <code>/broadcast Your message here</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    message = " ".join(context.args)
+    from database import get_all_subscribed_users
+    users    = get_all_subscribed_users()
+    sent     = 0
+    failed   = 0
+    msg      = await update.effective_message.reply_text(f"📡 Broadcasting to {len(users)} user(s)...")
+
+    for user in users:
+        try:
+            await context.bot.send_message(
+                chat_id=user["user_id"],
+                text=f"📢 <b>Announcement</b>\n\n{message}",
+                parse_mode=ParseMode.HTML
+            )
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await msg.edit_text(
+        f"✅ Broadcast complete.\n\nSent: <code>{sent}</code>  Failed: <code>{failed}</code>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+# ── /referral ─────────────────────────────────────────────────────────────────
+
+@require_granted
+async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid      = update.effective_user.id
+    bot_info = await context.bot.get_me()
+    link     = get_referral_link(uid, bot_info.username)
+    stats    = get_referral_stats(uid)
+
+    await update.effective_message.reply_text(
+        f"🔗 <b>Your Referral Link</b>\n\n"
+        f"<code>{link}</code>\n\n"
+        f"Share this link. When someone subscribes through it, "
+        f"you earn <b>1 free month</b> automatically.\n\n"
+        f"<b>Your Stats</b>\n"
+        f"  Total referrals:    <code>{stats['total']}</code>\n"
+        f"  Rewarded:           <code>{stats['rewarded']}</code>\n"
+        f"  Pending (not paid): <code>{stats['pending']}</code>\n\n"
+        f"Referral code: <code>{stats['code']}</code>",
+        parse_mode=ParseMode.HTML
+    )
+
+
 # ── /help ─────────────────────────────────────────────────────────────────────
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "🤖 <b>CryptoTradeBot Commands</b>\n\n"
-        "💰 /balance       — View exchange balance\n"
-        "▶️  /start_trade   — Enable auto-trading\n"
-        "⏹  /stop_trade    — Disable auto-trading\n"
-        "⚙️  /settings      — Configure exchange & parameters\n"
-        "📜 /history       — Last 10 closed trades\n"
-        "📊 /chart         — Current signal & indicators\n"
-        "📈 /pnl           — Profit & Loss summary\n"
-        "💊 /health        — Monitor open trades live\n"
-        "📋 /summary       — Trade cycle summary\n"
-        "🏦 /exchanges     — List supported exchanges\n"
-        "📩 /support       — Message admin\n"
-        "💳 /subscribe     — Subscribe for $12/month\n"
-        "🪪  /mystatus      — View your subscription status\n\n"
+    uid = update.effective_user.id
+
+    user_commands = (
+        "🤖 <b>CryptoTradeBot — Commands</b>\n\n"
+        "<b>💼 Trading</b>\n"
+        "  /dashboard     — Full overview in one screen\n"
+        "  /balance       — View exchange balance\n"
+        "  /start_trade   — Enable auto-trading\n"
+        "  /stop_trade    — Disable auto-trading\n"
+        "  /health        — Monitor open trades live\n"
+        "  /history       — Last 10 closed trades\n"
+        "  /pnl           — Profit & Loss summary\n"
+        "  /summary       — Trade cycle summary\n"
+        "  /chart         — Live price + signal + indicators\n\n"
+        "<b>⚙️ Setup</b>\n"
+        "  /settings      — Configure exchange, TP, SL, symbol, toggles\n"
+        "  /exchanges     — List supported exchanges\n\n"
         "<b>🔔 Price Alerts</b>\n"
-        "/setalert SYMBOL above|below PRICE — Set a price alert\n"
-        "/myalerts — View all your active alerts\n"
-        "/delalert &lt;id&gt; — Remove an alert\n\n"
-        "<i>Admin only:</i>\n"
-        "🔑 /grant &lt;id&gt;    — Grant lifetime access\n"
-        "👥 /subscribers   — List all subscribers\n"
-        "🚨 /panic         — Emergency close all trades\n"
+        "  /setalert SYMBOL above|below PRICE\n"
+        "  /myalerts      — View active alerts\n"
+        "  /delalert &lt;id&gt; — Delete an alert\n\n"
+        "<b>💳 Subscription</b>\n"
+        "  /subscribe     — Subscribe or start free trial\n"
+        "  /mystatus      — View your subscription status\n"
+        "  /referral      — Get your referral link (earn free months)\n\n"
+        "<b>📩 Support</b>\n"
+        "  /support &lt;message&gt; — Contact the support team\n\n"
+        "<b>🚨 Emergency</b>\n"
+        "  /panic         — Close all YOUR open trades immediately\n"
     )
+
+    admin_commands = (
+        "\n<b>🔐 Admin Commands</b>\n"
+        "  /grant &lt;user_id&gt;              — Grant lifetime access\n"
+        "  /reply &lt;user_id&gt; &lt;msg&gt;  — Reply to a user\n"
+        "  /broadcast &lt;msg&gt;             — Message all subscribers\n"
+        "  /subscribers                   — List all subscribers\n"
+        "  /close                         — Emergency close ALL platform trades\n"
+    )
+
+    text = user_commands + (admin_commands if is_admin(uid) else "")
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
@@ -791,17 +1338,390 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await BUTTON_MAP[data](update, context)
 
     # Settings flows
+    elif data == "toggle_tp_mode":
+        s      = get_settings(uid)
+        cur    = s.get("tp_mode", "pct")
+        new    = "price" if cur == "pct" else "pct"
+        update_setting(uid, "tp_mode", new)
+        label  = "Percentage %" if new == "pct" else "Fixed Price $"
+        hint   = "Enter a % value (e.g. 2.5)" if new == "pct" else "Enter a price value in USDT (e.g. 68500)"
+        await query.message.reply_text(
+            f"🔁 <b>Take Profit mode → {label}</b>\n\n"
+            f"ℹ️ {hint}\n\n"
+            f"Update your Take Profit value via ⚙️ Settings → 🎯 Take Profit.",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data == "toggle_sl_mode":
+        s      = get_settings(uid)
+        cur    = s.get("sl_mode", "pct")
+        new    = "price" if cur == "pct" else "pct"
+        update_setting(uid, "sl_mode", new)
+        label  = "Percentage %" if new == "pct" else "Fixed Price $"
+        hint   = "Enter a % value (e.g. 1.0)" if new == "pct" else "Enter a price value in USDT (e.g. 65000)"
+        await query.message.reply_text(
+            f"🔁 <b>Stop Loss mode → {label}</b>\n\n"
+            f"ℹ️ {hint}\n\n"
+            f"Update your Stop Loss value via ⚙️ Settings → 🛑 Stop Loss.",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data == "toggle_confirm":
+        s   = get_settings(uid)
+        new = 0 if s.get("confirm_trades", 0) else 1
+        update_setting(uid, "confirm_trades", new)
+        status = "ON ✅ — I will ask you to approve each trade before it executes." if new else "OFF ⬜ — Trades execute automatically."
+        await query.message.reply_text(
+            f"{'✅' if new else '⬜'} <b>Trade Confirmation: {status}</b>",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data == "toggle_trailing":
+        s   = get_settings(uid)
+        new = 0 if s.get("trailing_stop", 0) else 1
+        update_setting(uid, "trailing_stop", new)
+        status = "ON ✅ — Stop loss moves up as profit grows, locking in gains." if new else "OFF ⬜ — Fixed stop loss."
+        await query.message.reply_text(
+            f"{'✅' if new else '⬜'} <b>Trailing Stop: {status}</b>",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data == "toggle_suggestions":
+        s   = get_settings(uid)
+        new = 0 if s.get("signal_suggestions", 1) else 1
+        update_setting(uid, "signal_suggestions", new)
+        status = "ON ✅ — You'll receive suggestions for high-confidence signals." if new else "OFF ⬜ — No signal suggestions."
+        await query.message.reply_text(
+            f"{'✅' if new else '⬜'} <b>Signal Alerts: {status}</b>",
+            parse_mode=ParseMode.HTML
+        )
+
     elif data == "set_tp":
+        s    = get_settings(uid)
+        mode = s.get("tp_mode", "pct")
         PENDING_INPUT[uid] = {"field": "take_profit"}
-        await query.message.reply_text("🎯 Enter new Take Profit % (e.g. <code>2.5</code>):", parse_mode=ParseMode.HTML)
+        if mode == "pct":
+            await query.message.reply_text(
+                "🎯 <b>Take Profit — Percentage Mode</b>\n\n"
+                "Enter the % gain to close at.\n"
+                "Example: <code>2.5</code> closes when up 2.5%\n\n"
+                "To switch to fixed price mode, use ⚙️ Settings → 🔁 TP Mode.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await query.message.reply_text(
+                "🎯 <b>Take Profit — Fixed Price Mode</b>\n\n"
+                "Enter the exact price (in USDT) to close at.\n"
+                "Example: <code>68500</code> closes when BTC hits $68,500\n\n"
+                "To switch to percentage mode, use ⚙️ Settings → 🔁 TP Mode.",
+                parse_mode=ParseMode.HTML
+            )
+
     elif data == "set_sl":
+        s    = get_settings(uid)
+        mode = s.get("sl_mode", "pct")
         PENDING_INPUT[uid] = {"field": "stop_loss"}
-        await query.message.reply_text("🛑 Enter new Stop Loss % (e.g. <code>1.0</code>):", parse_mode=ParseMode.HTML)
+        if mode == "pct":
+            await query.message.reply_text(
+                "🛑 <b>Stop Loss — Percentage Mode</b>\n\n"
+                "Enter the % drop to exit at.\n"
+                "Example: <code>1.0</code> exits when down 1%\n\n"
+                "To switch to fixed price mode, use ⚙️ Settings → 🔁 SL Mode.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await query.message.reply_text(
+                "🛑 <b>Stop Loss — Fixed Price Mode</b>\n\n"
+                "Enter the exact price (in USDT) to exit at.\n"
+                "Example: <code>62000</code> exits when BTC drops to $62,000\n\n"
+                "To switch to percentage mode, use ⚙️ Settings → 🔁 SL Mode.",
+                parse_mode=ParseMode.HTML
+            )
     elif data == "set_amount":
         PENDING_INPUT[uid] = {"field": "trade_amount"}
         await query.message.reply_text("💵 Enter trade amount in USDT (e.g. <code>20</code>):", parse_mode=ParseMode.HTML)
     elif data == "set_symbol":
         await _show_symbol_picker(query.message, uid)
+    elif data == "panic_cancel":
+        await query.message.edit_text(
+            "✅ <b>Panic cancelled.</b> Your trades remain open.",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data == "panic_confirm_user":
+        # User closing their own trades
+        await query.message.edit_text(
+            "⏳ Closing your open trades at market price...",
+            parse_mode=ParseMode.HTML
+        )
+        closed, errors = await _execute_user_panic(context, uid)
+
+        if errors:
+            err_text = "\n".join(f"  ⚠️ {e}" for e in errors[:5])
+            result_text = (
+                f"🚨 <b>Panic Complete</b>\n\n"
+                f"Closed: <code>{closed}</code> trade(s)\n"
+                f"Auto-trading: <b>STOPPED</b>\n\n"
+                f"Some errors occurred:\n{err_text}"
+            )
+        else:
+            result_text = (
+                f"✅ <b>Panic Complete</b>\n\n"
+                f"Closed: <code>{closed}</code> trade(s)\n"
+                f"Auto-trading: <b>STOPPED</b>\n\n"
+                f"All your positions have been closed at market price."
+            )
+        await query.message.edit_text(result_text, parse_mode=ParseMode.HTML)
+
+    elif data == "panic_confirm_admin":
+        # Admin closing all trades platform-wide
+        if not is_admin(uid):
+            await query.answer("Not authorised.", show_alert=True)
+            return
+
+        await query.message.edit_text(
+            "🚨 <b>ADMIN PANIC IN PROGRESS...</b>\n\nClosing all trades platform-wide...",
+            parse_mode=ParseMode.HTML
+        )
+
+        all_users    = get_all_trading_users()
+        total_closed = 0
+        total_errors = 0
+
+        for platform_user in all_users:
+            user_id = platform_user["user_id"]
+            closed, errors = await _execute_user_panic(context, user_id)
+            total_closed += closed
+            total_errors += len(errors)
+            # Notify each affected user
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "🚨 <b>ADMIN PANIC ACTIVATED</b>\n\n"
+                        f"All your trades have been closed by an admin.\n"
+                        f"Auto-trading has been stopped.\n\n"
+                        f"Trades closed: <code>{closed}</code>"
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
+        summary_text = (
+            f"✅ <b>Admin Panic Complete</b>\n\n"
+            f"Users processed: <code>{len(all_users)}</code>\n"
+            f"Trades closed:   <code>{total_closed}</code>\n"
+            f"Errors:          <code>{total_errors}</code>\n\n"
+            f"All auto-trading has been disabled."
+        )
+        await query.message.edit_text(summary_text, parse_mode=ParseMode.HTML)
+
+    elif data.startswith("confirm_trade_"):
+        # confirm_trade_<id>_approve  or  confirm_trade_<id>_skip
+        parts = data.split("_")
+        try:
+            confirm_id = int(parts[2])
+            decision   = parts[3]  # "approve" or "skip"
+        except (IndexError, ValueError):
+            return
+        from scheduler import handle_trade_confirmation_callback
+        await handle_trade_confirmation_callback(context, uid, confirm_id, decision)
+
+    elif data == "trade_mode_auto":
+        user = get_user(uid)
+        try:
+            exch = get_exchange(user["exchange"], user["api_key"], user["api_secret"], user["api_pass"])
+            bal  = fetch_usdt_balance(exch)
+        except Exception:
+            bal  = 0.0
+        await _activate_trading(context, uid, "auto", bal)
+
+    elif data == "trade_mode_manual":
+        user = get_user(uid)
+        try:
+            exch = get_exchange(user["exchange"], user["api_key"], user["api_secret"], user["api_pass"])
+            bal  = fetch_usdt_balance(exch)
+        except Exception:
+            bal  = 0.0
+        await _activate_trading(context, uid, "manual", bal)
+
+    elif data == "manual_buy_now":
+        # User tapped "Start Now" in manual mode — fire a buy immediately
+        user = get_user(uid)
+        s    = get_settings(uid)
+        if not s or not s.get("trading_on"):
+            await query.message.reply_text(
+                "⚠️ Trading is not active. Use /start_trade first.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        await query.message.reply_text("⏳ Fetching chart and executing buy...")
+        try:
+            exch          = get_exchange(user["exchange"], user["api_key"], user["api_secret"], user["api_pass"])
+            ticker        = fetch_ticker(exch, s["symbol"])
+            current_price = ticker["last"]
+            usdt_bal      = fetch_usdt_balance(exch)
+            trade_amount  = s["trade_amount"]
+
+            if trade_amount > usdt_bal:
+                await query.message.reply_text(
+                    f"⚠️ <b>Insufficient funds</b>\n\n"
+                    f"Need: <code>{trade_amount:.2f} USDT</code>\n"
+                    f"Have: <code>{usdt_bal:.8f} USDT</code>",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+
+            from exchange import place_market_order
+            from database import open_trade as db_open_trade
+            from logger_setup import log_trade_open
+            order    = place_market_order(exch, s["symbol"], "buy", trade_amount)
+            order_id = str(order.get("id", "manual"))
+            db_open_trade(uid, s["symbol"], "buy", current_price, trade_amount,
+                          user["exchange"], order_id, "Manual buy")
+            log_trade_open(uid, s["symbol"], "buy", current_price, trade_amount,
+                           user["exchange"], order_id)
+
+            tp_label = f"{s['take_profit']}{'%' if s.get('tp_mode','pct')=='pct' else ' USDT'}"
+            sl_label = f"{s['stop_loss']}{'%' if s.get('sl_mode','pct')=='pct' else ' USDT'}"
+
+            keyboard = [
+                [InlineKeyboardButton("🟢 Buy Again",    callback_data="manual_buy_now"),
+                 InlineKeyboardButton("💊 Health",       callback_data="cmd_health")],
+                [InlineKeyboardButton("⏹ Stop Trading", callback_data="cmd_stop_trade"),
+                 InlineKeyboardButton("📊 Chart",        callback_data="cmd_chart")],
+            ]
+            await query.message.reply_text(
+                f"🚀 <b>Manual Buy Executed!</b>\n\n"
+                f"Symbol: <code>{s['symbol']}</code>\n"
+                f"Price:  <code>${current_price:,.6f}</code>\n"
+                f"Amount: <code>{trade_amount:.2f} USDT</code>\n"
+                f"TP: <code>{tp_label}</code>  |  SL: <code>{sl_label}</code>\n\n"
+                f"TP/SL will trigger automatically. Tap <b>Buy Again</b> for another entry.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            await query.message.reply_text(
+                f"❌ <b>Buy failed</b>\n\n<code>{str(e)[:200]}</code>",
+                parse_mode=ParseMode.HTML
+            )
+
+    elif data == "noop":
+        pass  # separator buttons — do nothing
+
+    elif data == "free_trial":
+        if has_used_trial(uid):
+            await query.message.reply_text(
+                "❌ <b>Trial Already Used</b>\n\n"
+                "Your free trial has already been activated on this account.\n"
+                "Please subscribe to continue using CryptoTradeBot.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            expiry = activate_trial(uid)
+            await query.message.reply_text(
+                f"🎉 <b>Free Trial Activated!</b>\n\n"
+                f"You have <b>{FREE_TRIAL_DAYS} days</b> of full access.\n"
+                f"Trial expires: <code>{expiry}</code>\n\n"
+                f"Use /start to explore all features.\n"
+                f"Subscribe before your trial ends to keep access!",
+                parse_mode=ParseMode.HTML
+            )
+
+    elif data == "crypto_sub":
+        # Legacy: show network picker
+        active_nets = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
+        if not active_nets:
+            await query.message.reply_text(
+                "⚠️ Crypto payment is not configured yet. Please use Paystack instead.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        keyboard = [[InlineKeyboardButton(
+            f"🪙 {v['label']} — USDT", callback_data=f"crypto_net_{k}"
+        )] for k, v in active_nets.items()]
+        await query.message.reply_text(
+            "🪙 <b>Choose your preferred network</b>\n\nAll networks accept USDT:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data.startswith("crypto_net_"):
+        # User picked a network — now show plan picker
+        net_key  = data[len("crypto_net_"):]
+        net_info = CRYPTO_NETWORKS.get(net_key)
+        if not net_info or not net_info.get("address"):
+            await query.message.reply_text(
+                f"⚠️ {net_key.upper()} payment address is not configured. Choose another network.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        keyboard = [
+            [InlineKeyboardButton(f"1 Month  — 12 USDT",        callback_data=f"crypto_plan_{net_key}_1")],
+            [InlineKeyboardButton(f"3 Months — 34 USDT (save)", callback_data=f"crypto_plan_{net_key}_3")],
+            [InlineKeyboardButton(f"6 Months — 65 USDT (best)", callback_data=f"crypto_plan_{net_key}_6")],
+        ]
+        await query.message.reply_text(
+            f"🪙 <b>Pay via {net_info['label']}</b>\n\nChoose your plan:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data.startswith("crypto_plan_"):
+        # crypto_plan_<network>_<months>
+        parts = data.split("_")
+        # parts = ["crypto", "plan", net_key, months]
+        try:
+            months  = int(parts[-1])
+            net_key = "_".join(parts[2:-1])
+        except (IndexError, ValueError):
+            return
+        net_info = CRYPTO_NETWORKS.get(net_key)
+        if not net_info or not net_info.get("address"):
+            await query.message.reply_text("⚠️ Network not configured. Please choose another.", parse_mode=ParseMode.HTML)
+            return
+        amount  = PLAN_PRICES_USDT.get(months, 12.00)
+        address = net_info["address"]
+        token   = net_info["token"]
+        note    = net_info["note"]
+        PENDING_INPUT[uid] = {
+            "field":   "tx_hash",
+            "months":  months,
+            "amount":  amount,
+            "network": net_key,
+        }
+        await query.message.reply_text(
+            f"🪙 <b>Pay with {token} on {net_info['label']}</b>\n\n"
+            f"Plan:    <b>{months} Month{'s' if months > 1 else ''}</b>\n"
+            f"Amount:  <code>{amount:.2f} USDT</code>\n\n"
+            f"Send exactly <b>{amount:.2f} USDT</b> to:\n\n"
+            f"<code>{address}</code>\n\n"
+            f"⚠️ <b>Important:</b> {note}\n\n"
+            f"After sending, paste your <b>transaction hash (TX ID)</b> here:",
+            parse_mode=ParseMode.HTML
+        )
+
+    # Legacy single-plan crypto_N callbacks (kept for backward compat)
+    elif data.startswith("crypto_") and len(data.split("_")) == 2:
+        try:
+            months = int(data.split("_")[1])
+        except (IndexError, ValueError):
+            return
+        active_nets = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
+        if not active_nets:
+            await query.message.reply_text("⚠️ Crypto payment not configured.", parse_mode=ParseMode.HTML)
+            return
+        keyboard = [[InlineKeyboardButton(
+            f"🪙 {v['label']}", callback_data=f"crypto_plan_{k}_{months}"
+        )] for k, v in active_nets.items()]
+        await query.message.reply_text(
+            f"🪙 Choose network for your {months}-month plan:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+
     elif data == "sym_search":
         PENDING_INPUT[uid] = {"field": "symbol_search"}
         await query.message.reply_text(
@@ -891,7 +1811,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Reply keyboard button label → callback_data mapping
 REPLY_BUTTON_COMMANDS = {
+    "📊 Dashboard":    "cmd_dashboard",
     "💰 Balance":      "cmd_balance",
+    "🔗 Referral":     "cmd_referral",
     "📊 Chart":        "cmd_chart",
     "▶️ Start Trade":  "cmd_start_trade",
     "⏹ Stop Trade":   "cmd_stop_trade",
@@ -909,6 +1831,8 @@ REPLY_BUTTON_COMMANDS = {
     "🔕 My Alerts":    "cmd_myalerts",
     "👥 Subscribers":  "cmd_subscribers",
     "🚨 Panic":        "cmd_panic",
+    "📴 Close All":   "cmd_close",
+    "👥 Subscribers":  "cmd_subscribers",
 }
 
 
@@ -931,19 +1855,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if field == "take_profit":
         try:
-            val = float(text)
+            val  = float(text.replace(",", "").strip())
+            s    = get_settings(uid)
+            mode = s.get("tp_mode", "pct")
+            if mode == "pct":
+                if val <= 0 or val > 100:
+                    await update.effective_message.reply_text(
+                        "❌ Percentage must be between 0 and 100. Try again:"
+                    )
+                    return
+                label = f"{val}%"
+            else:
+                if val <= 0:
+                    await update.effective_message.reply_text("❌ Price must be greater than 0. Try again:")
+                    return
+                label = f"${val:,.4f} (fixed price)"
             update_setting(uid, "take_profit", val)
-            await update.effective_message.reply_text(f"✅ Take Profit set to <code>{val}%</code>", parse_mode=ParseMode.HTML)
             del PENDING_INPUT[uid]
+            await update.effective_message.reply_text(
+                f"✅ <b>Take Profit set to <code>{label}</code></b>\n\n"
+                f"The bot will close the trade when the position reaches this target.",
+                parse_mode=ParseMode.HTML
+            )
         except ValueError:
             await update.effective_message.reply_text("❌ Please enter a valid number.")
 
     elif field == "stop_loss":
         try:
-            val = float(text)
+            val  = float(text.replace(",", "").strip())
+            s    = get_settings(uid)
+            mode = s.get("sl_mode", "pct")
+            if mode == "pct":
+                if val <= 0 or val > 100:
+                    await update.effective_message.reply_text(
+                        "❌ Percentage must be between 0 and 100. Try again:"
+                    )
+                    return
+                label = f"{val}%"
+            else:
+                if val <= 0:
+                    await update.effective_message.reply_text("❌ Price must be greater than 0. Try again:")
+                    return
+                label = f"${val:,.4f} (fixed price)"
             update_setting(uid, "stop_loss", val)
-            await update.effective_message.reply_text(f"✅ Stop Loss set to <code>{val}%</code>", parse_mode=ParseMode.HTML)
             del PENDING_INPUT[uid]
+            await update.effective_message.reply_text(
+                f"✅ <b>Stop Loss set to <code>{label}</code></b>\n\n"
+                f"The bot will exit the trade to limit losses at this level.",
+                parse_mode=ParseMode.HTML
+            )
         except ValueError:
             await update.effective_message.reply_text("❌ Please enter a valid number.")
 
@@ -955,6 +1915,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del PENDING_INPUT[uid]
         except ValueError:
             await update.effective_message.reply_text("❌ Please enter a valid number.")
+
+    elif field == "tx_hash":
+        tx_hash  = text.strip()
+        months   = pi.get("months", 1)
+        amount   = pi.get("amount", 12.00)
+        network  = pi.get("network", "aptos")
+        del PENDING_INPUT[uid]
+
+        net_info = CRYPTO_NETWORKS.get(network, {})
+        net_label = net_info.get("label", network.upper())
+        address   = net_info.get("address", "")
+        api_key   = TRONGRID_API_KEY if network == "tron" else (BSCSCAN_API_KEY if network == "bsc" else "")
+
+        msg = await update.effective_message.reply_text(
+            f"⏳ Verifying your transaction on the {net_label} network...",
+            parse_mode=ParseMode.HTML
+        )
+        result = verify_usdt_tx(network, tx_hash, amount, months, address, api_key)
+
+        if result["valid"]:
+            record_crypto_payment(uid, tx_hash, result["amount"], months, result.get("from_address", ""))
+            expiry = confirm_crypto_payment(tx_hash)
+            await msg.edit_text(
+                f"✅ <b>Payment Confirmed!</b>\n\n"
+                f"Amount:   <code>{result['amount']:.2f} USDT</code>\n"
+                f"Plan:     <code>{months} month{'s' if months > 1 else ''}</code>\n"
+                f"Expires:  <code>{expiry}</code>\n"
+                f"TX Hash:  <code>{tx_hash[:20]}...{tx_hash[-10:]}</code>\n\n"
+                f"🎉 Your subscription is now active! Use /start to get started.",
+                parse_mode=ParseMode.HTML
+            )
+            # Notify admins
+            for admin_id in ADMIN_IDS:
+                try:
+                    user = get_user(uid)
+                    uname = f"@{user['username']}" if user and user["username"] else str(uid)
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=(
+                            f"💰 <b>Crypto Payment Confirmed</b>\n\n"
+                            f"User:    {uname} (<code>{uid}</code>)\n"
+                            f"Network: <code>{net_label}</code>\n"
+                            f"Amount:  <code>{result['amount']:.2f} USDT</code>\n"
+                            f"Plan:    <code>{months} month(s)</code>\n"
+                            f"TX:      <code>{tx_hash}</code>"
+                        ),
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+        else:
+            # Let user retry with a new hash
+            PENDING_INPUT[uid] = {"field": "tx_hash", "months": months, "amount": amount, "network": network}
+            await msg.edit_text(
+                f"❌ <b>Payment Not Verified</b>\n\n"
+                f"{result['error']}\n\n"
+                f"Send your transaction hash again once resolved:",
+                parse_mode=ParseMode.HTML
+            )
 
     elif field == "pay_email":
         email  = text.strip()
@@ -1102,12 +2121,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             else:
                 save_exchange_creds(uid, exch_id, api_key_stored, text)
+                if exch_id == "mexc":
+                    record_mexc_key_saved(uid)
                 del PENDING_INPUT[uid]
+                mexc_note = (
+                    "\n\n⚠️ <b>MEXC Note:</b> MEXC API keys expire after 90 days. "
+                    "Set a reminder to renew them!"
+                ) if exch_id == "mexc" else ""
                 await context.bot.send_message(
                     chat_id=uid,
                     text=f"✅ <b>{EXCHANGE_LABELS.get(exch_id, exch_id)}</b> keys saved!\n\n"
                          f"🔒 Stored securely in the database.\n"
-                         f"💡 Use /balance to verify the connection is working.",
+                         f"💡 Use /balance to verify the connection is working.{mexc_note}",
                     parse_mode=ParseMode.HTML
                 )
 
@@ -1168,6 +2193,7 @@ def _make_cmd(fn):
 def _build_button_map():
     # Import here (not at top) to avoid any residual import ordering issues
     import alerts_handlers as _ah  # lazy: safe inside function
+    # close_all_cmd and reply_user are defined in handlers.py (same module)
     return {
         "cmd_balance":     _make_cmd(balance),
         "cmd_chart":       _make_cmd(chart),
@@ -1183,10 +2209,15 @@ def _build_button_map():
         "cmd_mystatus":    _make_cmd(mystatus),
         "cmd_support":     _make_cmd(support),
         "cmd_help":        _make_cmd(help_cmd),
+        "cmd_dashboard":   _make_cmd(dashboard),
+        "cmd_referral":    _make_cmd(referral),
+        "cmd_broadcast":   _make_cmd(broadcast),
         "cmd_setalert":    _make_cmd(_ah.setalert),
         "cmd_myalerts":    _make_cmd(_ah.myalerts),
         "cmd_subscribers": _make_cmd(subscribers),
         "cmd_panic":       _make_cmd(panic),
+        "cmd_close":       _make_cmd(close_all_cmd),
+        "cmd_reply":       _make_cmd(reply_user),
     }
 
 

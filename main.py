@@ -1,5 +1,5 @@
 """
-DUYS Trading Bot - Telegram Crypto Trading Bot
+CryptoTradeBot - Telegram Crypto Trading Bot
 Entry point: starts the bot and scheduler
 """
 
@@ -10,21 +10,16 @@ from config import BOT_TOKEN
 from handlers import (
     start, balance, start_trade, stop_trade, settings, history,
     chart, pnl, help_cmd, health, summary, exchanges, support,
-    grant, panic, handle_message, handle_callback,
-    subscribe, mystatus, subscribers
+    grant, panic, close_all_cmd, reply_user,
+    handle_message, handle_callback,
+    subscribe, mystatus, subscribers,
+    dashboard, broadcast, referral
 )
 from alerts_handlers import setalert, myalerts, delalert
 from scheduler import start_scheduler
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+from logger_setup import setup_logging, init_error_reporter
+logger = setup_logging()
 
 
 def main():
@@ -46,6 +41,11 @@ def main():
     app.add_handler(CommandHandler("support", support))
     app.add_handler(CommandHandler("grant", grant))
     app.add_handler(CommandHandler("panic", panic))
+    app.add_handler(CommandHandler("close", close_all_cmd))
+    app.add_handler(CommandHandler("reply", reply_user))
+    app.add_handler(CommandHandler("dashboard", dashboard))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("referral", referral))
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("mystatus", mystatus))
     app.add_handler(CommandHandler("subscribers", subscribers))
@@ -66,7 +66,16 @@ def main():
     from threading import Thread
     Thread(target=run_webhook_server, daemon=True).start()
 
-    logger.info("DUYS Trading Bot is starting...")
+    # Initialise error reporter so scheduler can DM admins on errors
+    from config import ADMIN_IDS as _ADMIN_IDS
+    init_error_reporter(app.bot, _ADMIN_IDS)
+
+    # Add encryption key check
+    from encryption import is_configured as _enc_ok
+    if not _enc_ok():
+        logger.warning("⚠️  ENCRYPTION_KEY not set — API keys stored unencrypted. See encryption.py for setup.")
+
+    logger.info("CryptoTradeBot is starting...")
     app.run_polling(drop_pending_updates=True)
 
 
