@@ -189,6 +189,23 @@ def init_db():
             "ALTER TABLE user_settings ADD COLUMN report_hour INTEGER DEFAULT 8",
             "ALTER TABLE user_settings ADD COLUMN last_report_date TEXT DEFAULT NULL",
             "ALTER TABLE user_settings ADD COLUMN trade_mode TEXT DEFAULT 'auto'",
+            "ALTER TABLE users ADD COLUMN tz_offset INTEGER DEFAULT 0",
+            """CREATE TABLE IF NOT EXISTS signal_history (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id           INTEGER NOT NULL,
+                symbol            TEXT,
+                action            TEXT,
+                confidence        INTEGER,
+                reason            TEXT,
+                resulted_in_trade INTEGER DEFAULT 0,
+                outcome_pnl       REAL    DEFAULT NULL,
+                created_at        TEXT    DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS onboarding_state (
+                user_id   INTEGER PRIMARY KEY,
+                step      TEXT DEFAULT 'exchange',
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )""",
             """CREATE TABLE IF NOT EXISTS crypto_payments (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id       INTEGER NOT NULL,
@@ -877,3 +894,297 @@ def get_all_users_for_key_check() -> list:
             FROM users
             WHERE exchange='mexc' AND api_key != '' AND mexc_key_saved_at IS NOT NULL
         """).fetchall()
+
+
+# ── Subscription renewal reminder helpers ─────────────────────────────────────
+
+def get_users_expiring_soon(days: int) -> list:
+    """Return users whose subscription expires in exactly `days` days."""
+    from datetime import date, timedelta
+    target      = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
+    target_next = (datetime.utcnow().date() + timedelta(days=days + 1)).isoformat()
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT user_id, username, sub_expiry
+            FROM users
+            WHERE granted = 0
+              AND sub_expiry IS NOT NULL
+              AND sub_expiry >= ?
+              AND sub_expiry < ?
+        """, (target, target_next)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Trade deduplication guard ─────────────────────────────────────────────────
+
+def has_open_trade_for_symbol(user_id: int, symbol: str) -> bool:
+    """Return True if there is already an open trade for this user+symbol."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT id FROM trades
+            WHERE user_id=? AND symbol=? AND status='open'
+            LIMIT 1
+        """, (user_id, symbol)).fetchone()
+    return row is not None
+
+
+# ── Rate limiting state stored in DB for cross-restart persistence ────────────
+
+def get_user_timezone(user_id: int) -> str:
+    """Return user timezone string (default UTC)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT timezone FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()
+    return (row["timezone"] if row and row["timezone"] else "UTC") if row else "UTC"
+
+
+def set_user_timezone(user_id: int, tz: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET timezone=? WHERE user_id=?", (tz, user_id))
+
+
+# ── Admin user lookup ─────────────────────────────────────────────────────────
+
+def get_user_full_profile(user_id: int) -> dict | None:
+    """Return complete user profile for admin lookup."""
+    user = get_user(user_id)
+    if not user:
+        return None
+    s       = get_settings(user_id)
+    status  = get_subscription_status(user_id)
+    pnl_row = get_pnl_summary(user_id)
+    open_t  = get_open_trades(user_id)
+
+    return {
+        "user":        user,
+        "settings":    s,
+        "status":      status,
+        "pnl":         dict(pnl_row) if pnl_row else {},
+        "open_trades": len(open_t),
+        "referral_stats": None,  # filled by referral.py if needed
+    }
+
+
+# ── Bot status / platform stats ───────────────────────────────────────────────
+
+def get_platform_stats() -> dict:
+    """Return platform-wide statistics for /status command."""
+    now   = datetime.utcnow().isoformat()
+    today = datetime.utcnow().date().isoformat()
+    with get_conn() as conn:
+        total_users = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+        active_subs = conn.execute("""
+            SELECT COUNT(*) as c FROM users
+            WHERE granted=1 OR (sub_expiry IS NOT NULL AND sub_expiry > ?)
+        """, (now,)).fetchone()["c"]
+        active_traders = conn.execute("""
+            SELECT COUNT(*) as c FROM user_settings WHERE trading_on=1
+        """).fetchone()["c"]
+        open_trades = conn.execute("""
+            SELECT COUNT(*) as c FROM trades WHERE status='open'
+        """).fetchone()["c"]
+        today_trades = conn.execute("""
+            SELECT COUNT(*) as c FROM trades
+            WHERE status='closed' AND closed_at LIKE ?
+        """, (f"{today}%",)).fetchone()["c"]
+        today_pnl = conn.execute("""
+            SELECT COALESCE(SUM(pnl),0) as p FROM trades
+            WHERE status='closed' AND closed_at LIKE ?
+        """, (f"{today}%",)).fetchone()["p"]
+        total_pnl = conn.execute("""
+            SELECT COALESCE(SUM(pnl),0) as p FROM trades WHERE status='closed'
+        """).fetchone()["p"]
+    return {
+        "total_users":    total_users,
+        "active_subs":    active_subs,
+        "active_traders": active_traders,
+        "open_trades":    open_trades,
+        "today_trades":   today_trades,
+        "today_pnl":      round(today_pnl, 4),
+        "total_pnl":      round(total_pnl, 4),
+    }
+
+
+# ── Signal history ────────────────────────────────────────────────────────────
+
+def log_signal_history(user_id: int, symbol: str, action: str, confidence: int, resulted_in_trade: bool = False):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO signal_history
+                (user_id, symbol, action, confidence, resulted_in_trade)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, symbol, action, confidence, int(resulted_in_trade)))
+
+
+def get_signal_history(user_id: int, limit: int = 10) -> list:
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM signal_history
+            WHERE user_id=?
+            ORDER BY created_at DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── SL proximity check ────────────────────────────────────────────────────────
+
+def get_open_trades_near_sl(threshold_pct: float = 0.80) -> list:
+    """
+    Return open trades that are within threshold_pct of their stop loss.
+    e.g. threshold=0.80 means the price has moved 80% of the way to SL.
+    Returns a list of dicts with trade info + user settings.
+    """
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT t.*, s.stop_loss, s.sl_mode, u.exchange, u.api_key, u.api_secret, u.api_pass
+            FROM trades t
+            JOIN user_settings s ON t.user_id = s.user_id
+            JOIN users u ON t.user_id = u.user_id
+            WHERE t.status = 'open'
+              AND u.api_key != ''
+        """).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["api_key"]    = _dec(d.get("api_key", ""))
+        d["api_secret"] = _dec(d.get("api_secret", ""))
+        d["api_pass"]   = _dec(d.get("api_pass", ""))
+        result.append(d)
+    return result
+
+
+
+# ── Subscription Renewal helpers ──────────────────────────────────────────────
+
+def get_users_expiring_soon(days: int) -> list:
+    """Return users whose subscription expires in exactly N days (for renewal reminders)."""
+    from_dt = (datetime.utcnow() + timedelta(days=days)).date().isoformat()
+    to_dt   = (datetime.utcnow() + timedelta(days=days+1)).date().isoformat()
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT user_id, username, sub_expiry
+            FROM users
+            WHERE granted=0
+              AND sub_expiry IS NOT NULL
+              AND sub_expiry >= ?
+              AND sub_expiry < ?
+        """, (from_dt, to_dt)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Trade deduplication ───────────────────────────────────────────────────────
+
+def has_open_trade_for_symbol(user_id: int, symbol: str) -> bool:
+    """Return True if user already has an open trade for this symbol."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT id FROM trades
+            WHERE user_id=? AND symbol=? AND status='open'
+            LIMIT 1
+        """, (user_id, symbol)).fetchone()
+    return row is not None
+
+
+# ── Signal history ────────────────────────────────────────────────────────────
+
+def log_signal_to_db(user_id: int, symbol: str, action: str, confidence: int,
+                     reason: str, resulted_in_trade: bool = False):
+    """Store signal in signal_history table."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO signal_history
+                (user_id, symbol, action, confidence, reason, resulted_in_trade)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (user_id, symbol, action, confidence, reason[:300], int(resulted_in_trade)))
+
+
+def get_signal_history(user_id: int, limit: int = 10) -> list:
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM signal_history
+            WHERE user_id=?
+            ORDER BY created_at DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Platform stats (for /status command) ─────────────────────────────────────
+
+def get_platform_stats() -> dict:
+    now   = datetime.utcnow()
+    today = now.date().isoformat()
+    with get_conn() as conn:
+        total_users = conn.execute("SELECT COUNT(*) as c FROM users WHERE api_key != ''").fetchone()["c"]
+        active_subs = conn.execute("""
+            SELECT COUNT(*) as c FROM users
+            WHERE granted=1 OR (sub_expiry IS NOT NULL AND sub_expiry > ?)
+        """, (now.isoformat(),)).fetchone()["c"]
+        active_traders = conn.execute("""
+            SELECT COUNT(*) as c FROM user_settings WHERE trading_on=1
+        """).fetchone()["c"]
+        open_trades = conn.execute("SELECT COUNT(*) as c FROM trades WHERE status='open'").fetchone()["c"]
+        today_trades = conn.execute("""
+            SELECT COUNT(*) as c FROM trades
+            WHERE status='closed' AND closed_at LIKE ?
+        """, (f"{today}%",)).fetchone()["c"]
+        today_pnl = conn.execute("""
+            SELECT COALESCE(SUM(pnl), 0) as p FROM trades
+            WHERE status='closed' AND closed_at LIKE ?
+        """, (f"{today}%",)).fetchone()["p"]
+    return {
+        "total_users":    total_users,
+        "active_subs":    active_subs,
+        "active_traders": active_traders,
+        "open_trades":    open_trades,
+        "today_trades":   today_trades,
+        "today_pnl":      round(today_pnl, 4),
+    }
+
+
+# ── User lookup (for admin /user command) ────────────────────────────────────
+
+def get_user_full_profile(user_id: int) -> dict | None:
+    user = get_user(user_id)
+    if not user:
+        return None
+    s     = get_settings(user_id)
+    stats = None
+    with get_conn() as conn:
+        stats = conn.execute("""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                   COALESCE(SUM(pnl), 0) as total_pnl
+            FROM trades WHERE user_id=? AND status='closed'
+        """, (user_id,)).fetchone()
+        ref_count = conn.execute(
+            "SELECT COUNT(*) as c FROM referrals WHERE referrer_id=?", (user_id,)
+        ).fetchone()["c"]
+    sub = get_subscription_status(user_id)
+    return {
+        "user":      user,
+        "settings":  s,
+        "sub":       sub,
+        "trades":    dict(stats) if stats else {},
+        "referrals": ref_count,
+    }
+
+
+# ── Timezone helpers ──────────────────────────────────────────────────────────
+
+def set_user_timezone(user_id: int, tz_offset: int):
+    """Store UTC offset in hours (-12 to +14)."""
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET tz_offset=? WHERE user_id=?", (tz_offset, user_id))
+
+
+def get_user_tz_offset(user_id: int) -> int:
+    """Return stored UTC offset or 0."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT tz_offset FROM users WHERE user_id=?", (user_id,)).fetchone()
+    if row:
+        try:
+            return int(row["tz_offset"] or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0

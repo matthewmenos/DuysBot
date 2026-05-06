@@ -146,3 +146,25 @@ def close_all_positions(exchange: ccxt.Exchange, open_trades: list) -> list:
         except Exception as e:
             results.append({"symbol": trade["symbol"], "status": f"error: {e}"})
     return results
+
+
+def get_min_trade_amount(exchange: ccxt.Exchange, symbol: str) -> float:
+    """
+    Return the minimum order size in USDT for the given symbol.
+    Returns 0.0 if the exchange doesn't publish limits (safe fallback).
+    """
+    try:
+        markets = exchange.load_markets()
+        market  = markets.get(symbol, {})
+        limits  = market.get("limits", {})
+        amount  = limits.get("cost", {}).get("min") or limits.get("amount", {}).get("min", 0)
+        price   = (market.get("info") or {}).get("lastPrice") or 1
+        # cost min is in quote (USDT), amount min is in base — convert
+        if limits.get("cost", {}).get("min"):
+            return float(limits["cost"]["min"])
+        elif limits.get("amount", {}).get("min"):
+            return float(limits["amount"]["min"]) * float(price)
+        return 0.0
+    except Exception as e:
+        logger.warning(f"get_min_trade_amount error ({symbol}): {e}")
+        return 0.0

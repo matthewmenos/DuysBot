@@ -20,6 +20,8 @@ from database import (
     get_all_users_for_key_check, get_settings, get_multi_symbols,
     get_pending_confirmation, resolve_trade_confirmation,
     create_trade_confirmation, get_all_subscribed_users,
+    get_users_expiring_soon, has_open_trade_for_symbol,
+    log_signal_to_db, get_platform_stats,
 )
 from exchange import get_exchange, fetch_ohlcv, fetch_ticker, place_market_order
 from strategy import generate_signal
@@ -93,12 +95,35 @@ async def start_scheduler(context: ContextTypes.DEFAULT_TYPE):
             await check_api_key_expiry(context)
         except Exception as e:
             logger.error(f"Key expiry check error: {e}")
+            await report_error_to_admin(context, e, "check_api_key_expiry")
 
     # 6. Confirmation timeouts
     try:
         await expire_pending_confirmations(context)
     except Exception as e:
         logger.error(f"Confirmation timeout error: {e}")
+
+    # 7. Subscription renewal reminders (every 10 min)
+    if _key_check_counter % KEY_CHECK_INTERVAL == 0:
+        try:
+            await send_renewal_reminders(context)
+        except Exception as e:
+            logger.error(f"Renewal reminder error: {e}")
+
+    # 8. Daily database backup (every 24 hours = 1440 ticks)
+    if _suggestion_counter % 1440 == 0:
+        try:
+            await run_db_backup(context)
+        except Exception as e:
+            logger.error(f"DB backup error: {e}")
+            await report_error_to_admin(context, e, "run_db_backup")
+
+    # 9. SL warning check (every 5 min)
+    if _suggestion_counter % SUGGESTION_INTERVAL == 0:
+        try:
+            await check_sl_warnings(context)
+        except Exception as e:
+            logger.error(f"SL warning check error: {e}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -198,6 +223,7 @@ async def _process_symbol(context, user_id, exchange, exchange_id, symbol,
     ohlcv  = fetch_ohlcv(exchange, symbol, timeframe="1h", limit=100)
     signal = generate_signal(ohlcv, symbol)
     log_signal(symbol, signal["action"], signal["confidence"], signal["reason"], user_id)
+    log_signal_to_db(user_id, symbol, signal["action"], signal["confidence"], signal["reason"])
 
     # In manual mode — only manage TP/SL on existing trades; skip new auto entries
     if trade_mode == "manual":
@@ -223,6 +249,11 @@ async def _process_symbol(context, user_id, exchange, exchange_id, symbol,
                 return
         except Exception as e:
             logger.warning(f"Balance check failed for {user_id}: {e}")
+
+        # Deduplication: block if we already have an open trade on this symbol
+        if has_open_trade_for_symbol(user_id, symbol):
+            logger.info(f"Skipping buy — already have open trade on {symbol} for user {user_id}")
+            return
 
         if confirm:
             await _request_trade_confirmation(
@@ -455,32 +486,64 @@ async def run_signal_suggestions(context):
 
             signal = generate_signal(ohlcv_cache[ck], symbol)
             log_signal(symbol, signal["action"], signal["confidence"], signal["reason"], user_id)
+    log_signal_to_db(user_id, symbol, signal["action"], signal["confidence"], signal["reason"])
 
-            if signal["action"] == "BUY" and signal["confidence"] >= SUGGESTION_MIN_CONFIDENCE:
-                ind = signal.get("indicators", {})
-                try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=(
-                            f"💡 <b>Signal Suggestion</b>\n\n"
-                            f"📈 <b>{symbol}</b> on <b>{exch_id.title()}</b>\n\n"
-                            f"Signal:     <code>BUY</code>\n"
-                            f"Confidence: <code>{signal['confidence']}%</code>\n"
-                            f"Price:      <code>${ind.get('price', 0):,.6f}</code>\n"
-                            f"RSI:        <code>{ind.get('rsi', 'N/A')}</code>\n"
-                            f"EMA Trend:  <code>{'Bullish 📈' if ind.get('ema9',0)>ind.get('ema21',0) else 'Bearish 📉'}</code>\n\n"
-                            f"📝 <i>{signal['reason'][:200]}</i>\n\n"
-                            f"⚠️ Suggestion only — not financial advice.\n"
-                            f"Add via /settings → 🪙 Symbol to trade it."
-                        ),
-                        parse_mode="HTML"
-                    )
-                    _recently_suggested[user_id][symbol] = now_ts
-                    sent += 1
-                except Exception as e:
-                    logger.warning(f"Suggestion send failed uid={user_id}: {e}")
-            if sent >= 2:
-                break
+    # In manual mode — only manage TP/SL on existing trades; skip new auto entries
+    if trade_mode == "manual":
+        return
+
+    if signal["action"] == "BUY" and signal["confidence"] >= 50:
+        # Check balance before ordering
+        try:
+            balance = fetch_usdt_balance(exchange)
+            if trade_amt > balance:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"⚠️ <b>Insufficient Balance</b>\n\n"
+                        f"Wanted to buy <code>{symbol}</code> but your free USDT "
+                        f"(<code>{balance:.8f}</code>) is below your trade amount "
+                        f"(<code>{trade_amt:.2f} USDT</code>).\n\n"
+                        f"Top up or lower your trade amount via /settings."
+                    ),
+                    parse_mode="HTML"
+                )
+                return
+        except Exception as e:
+            logger.warning(f"Balance check failed uid={user_id}: {e}")
+            await report_error_to_admin(None, e, f"balance_check uid={user_id}")
+
+        # Minimum trade amount validation
+        try:
+            from exchange import get_min_trade_amount
+            min_amount = get_min_trade_amount(exchange, symbol)
+            if min_amount > 0 and trade_amt < min_amount:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"⚠️ <b>Trade Amount Too Small</b>\n\n"
+                        f"Your trade amount is <code>{trade_amt:.2f} USDT</code> but "
+                        f"the minimum for <code>{symbol}</code> on this exchange is "
+                        f"<code>{min_amount:.2f} USDT</code>.\n\n"
+                        f"Please increase your trade amount via /settings → 💵 Trade Amount."
+                    ),
+                    parse_mode="HTML"
+                )
+                return
+        except Exception as _min_err:
+            logger.warning(f"Min amount check failed: {_min_err}")
+
+        # Deduplication: block if already have open trade on this symbol
+        if has_open_trade_for_symbol(user_id, symbol):
+            logger.info(f"Skipping buy — already have open trade on {symbol} uid={user_id}")
+            return
+
+        if confirm:
+            await _request_trade_confirmation(
+                context, user_id, symbol, "buy", current_price, trade_amt, signal, exchange_id
+            )
+        else:
+            await _execute_buy(context, user_id, exchange, exchange_id, symbol, current_price, trade_amt, signal)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -552,3 +615,128 @@ async def check_api_key_expiry(context):
                 ),
                 parse_mode="HTML"
             )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 7. Subscription renewal reminders
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def send_renewal_reminders(context):
+    """Notify users 3 days and 1 day before subscription expiry."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    for days in [3, 1]:
+        users = get_users_expiring_soon(days)
+        for user in users:
+            uid = user["user_id"]
+            day_word = f"{days} day" + ("s" if days > 1 else "")
+            keyboard = [[InlineKeyboardButton("💳 Renew Now", callback_data="subscribe")]]
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=(
+                        f"⏰ <b>Subscription Expiring Soon!</b>\n\n"
+                        f"Your CryptoTradeBot subscription expires in "
+                        f"<b>{day_word}</b> on <code>{user['sub_expiry'][:10]}</code>.\n\n"
+                        f"Renew now to avoid losing access and having open trades "
+                        f"go unmonitored."
+                    ),
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="HTML"
+                )
+                logger.info(f"Renewal reminder sent to uid={uid} ({day_word} left)")
+            except Exception as e:
+                logger.warning(f"Renewal reminder failed uid={uid}: {e}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 8. Database backup
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def run_db_backup(context):
+    """Run a database backup and notify admins."""
+    from backup import run_backup
+    try:
+        path = run_backup()
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"💾 <b>Database Backup Complete</b>\n\n<code>{path}</code>",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"Backup failed: {e}")
+        raise
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 9. Stop Loss warning before close
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Track which trades have already been warned to avoid repeat messages
+_sl_warned: set = set()
+
+
+async def check_sl_warnings(context):
+    """
+    Warn users when a trade reaches 80% of its stop loss distance
+    so they can intervene before it auto-closes.
+    """
+    from database import get_all_trading_users, get_open_trades, get_settings
+    users = get_all_trading_users()
+    for user in users:
+        uid  = user["user_id"]
+        s    = get_settings(uid)
+        open_t = get_open_trades(uid)
+        if not open_t:
+            continue
+        try:
+            exch = get_exchange(user["exchange"], user["api_key"], user["api_secret"], user["api_pass"])
+        except Exception:
+            continue
+
+        sl_val  = s["stop_loss"]
+        sl_mode = s.get("sl_mode", "pct")
+
+        for trade in open_t:
+            trade = dict(trade)
+            tid   = trade["id"]
+            if tid in _sl_warned:
+                continue
+            try:
+                ticker = fetch_ticker(exch, trade["symbol"])
+                price  = ticker["last"]
+                entry  = trade["entry_price"]
+
+                if sl_mode == "pct":
+                    sl_distance_pct = sl_val / 100
+                    current_loss    = (entry - price) / entry if trade["side"] == "buy" else (price - entry) / entry
+                    pct_to_sl       = current_loss / sl_distance_pct if sl_distance_pct > 0 else 0
+                else:
+                    sl_price       = sl_val
+                    total_dist     = abs(entry - sl_price)
+                    current_dist   = abs(price - sl_price)
+                    pct_to_sl      = 1 - (current_dist / total_dist) if total_dist > 0 else 0
+
+                if pct_to_sl >= 0.80:
+                    _sl_warned.add(tid)
+                    pnl_pct = ((price - entry) / entry * 100) if trade["side"] == "buy" else ((entry - price) / entry * 100)
+                    await context.bot.send_message(
+                        chat_id=uid,
+                        text=(
+                            f"⚠️ <b>Stop Loss Warning!</b>\n\n"
+                            f"<b>{trade['symbol']}</b> is approaching your stop loss.\n\n"
+                            f"Entry:     <code>${entry:,.6f}</code>\n"
+                            f"Current:   <code>${price:,.6f}</code>\n"
+                            f"Current P/L: <code>{pnl_pct:+.2f}%</code>\n"
+                            f"SL proximity: <code>{pct_to_sl*100:.0f}%</code> of the way there\n\n"
+                            f"The trade will close automatically when SL is hit.\n"
+                            f"Use /panic to close now if you want to exit manually."
+                        ),
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"SL warning sent: uid={uid} trade={tid} {trade['symbol']}")
+            except Exception as e:
+                logger.warning(f"SL warning check failed for trade {tid}: {e}")

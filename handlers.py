@@ -62,6 +62,7 @@ def get_main_menu(uid: int) -> ReplyKeyboardMarkup:
         [KeyboardButton("▶️ Start Trade"), KeyboardButton("⏹ Stop Trade")],
         [KeyboardButton("📊 Chart"),      KeyboardButton("📈 PnL")],
         [KeyboardButton("📜 History"),    KeyboardButton("💊 Health")],
+        [KeyboardButton("📂 Positions"),  KeyboardButton("📡 Signals")],
         [KeyboardButton("🔔 Set Alert"),  KeyboardButton("🔕 My Alerts")],
         [KeyboardButton("⚙️ Settings"),   KeyboardButton("🏦 Exchanges")],
         [KeyboardButton("💳 Subscribe"),  KeyboardButton("🪪 My Status")],
@@ -1227,6 +1228,305 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+# ── /positions ────────────────────────────────────────────────────────────────
+
+@require_granted
+@require_creds
+async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all open positions with live unrealised PnL."""
+    uid    = update.effective_user.id
+    user   = get_user(uid)
+    open_t = get_open_trades(uid)
+
+    if not open_t:
+        keyboard = [[InlineKeyboardButton("▶️ Start Trading", callback_data="cmd_start_trade")]]
+        await update.effective_message.reply_text(
+            "📂 <b>No Open Positions</b>\n\nYou have no active trades right now.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    msg = await update.effective_message.reply_text("⏳ Fetching live prices...")
+    try:
+        exch   = get_exchange(user["exchange"], user["api_key"], user["api_secret"], user["api_pass"])
+        label  = EXCHANGE_LABELS.get(user["exchange"], user["exchange"].title())
+        lines  = [f"📂 <b>Open Positions — {label}</b>\n"]
+
+
+        total_pnl = 0.0
+        for t in open_t:
+            t      = dict(t)
+            ticker = fetch_ticker(exch, t["symbol"])
+            price  = ticker["last"]
+            entry  = t["entry_price"]
+            side   = t["side"]
+            pnl_pct = ((price - entry) / entry * 100) if side == "buy" else ((entry - price) / entry * 100)
+            pnl_usd = t["amount"] * pnl_pct / 100
+            total_pnl += pnl_usd
+            icon = "📈" if pnl_pct >= 0 else "📉"
+            duration = ""
+            try:
+                from datetime import datetime
+                opened  = datetime.fromisoformat(t["opened_at"])
+                elapsed = datetime.utcnow() - opened
+                hrs     = int(elapsed.total_seconds() // 3600)
+                mins    = int((elapsed.total_seconds() % 3600) // 60)
+                duration = f"  ⏱ Open {hrs}h {mins}m\n"
+            except Exception:
+                pass
+            lines.append(
+                f"{icon} <b>{t['symbol']}</b> [{side.upper()}]\n"
+                f"  Entry:   <code>${entry:,.6f}</code>\n"
+                f"  Current: <code>${price:,.6f}</code>\n"
+                f"  PnL:     <code>{'+'if pnl_usd>=0 else ''}{pnl_usd:.4f} USDT ({pnl_pct:+.2f}%)</code>\n"
+                f"  Amount:  <code>{t['amount']:.2f} USDT</code>\n"
+                f"{duration}"
+            )
+
+        total_icon = "📈" if total_pnl >= 0 else "📉"
+        lines.append(f"\n{total_icon} <b>Total Unrealised PnL: <code>{'+'if total_pnl>=0 else ''}{total_pnl:.4f} USDT</code></b>")
+
+        keyboard = [
+            [InlineKeyboardButton("🔄 Refresh",      callback_data="cmd_positions"),
+             InlineKeyboardButton("🚨 Panic Close",  callback_data="cmd_panic")],
+        ]
+        await msg.edit_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await msg.edit_text(
+            f"❌ <b>Failed to fetch positions</b>\n\n<code>{str(e)[:200]}</code>",
+            parse_mode=ParseMode.HTML
+        )
+
+
+# ── /export ───────────────────────────────────────────────────────────────────
+
+@require_granted
+async def export_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Export full trade history as a CSV file."""
+    uid    = update.effective_user.id
+    trades = get_trade_history(uid, limit=1000)
+
+    if not trades:
+        await update.effective_message.reply_text("📭 No trade history to export yet.")
+        return
+
+    msg = await update.effective_message.reply_text("⏳ Generating CSV...")
+    try:
+        import csv, io
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["#", "Symbol", "Side", "Entry Price", "Exit Price",
+                         "Amount (USDT)", "PnL (USDT)", "PnL %",
+                         "Status", "Exchange", "Signal", "Opened At", "Closed At"])
+        for i, t in enumerate(trades, 1):
+            t = dict(t)
+            writer.writerow([
+                i,
+                t.get("symbol", ""),
+                t.get("side", "").upper(),
+                f"{t.get('entry_price', 0):.6f}",
+                f"{t.get('exit_price', 0) or 0:.6f}",
+                f"{t.get('amount', 0):.4f}",
+                f"{t.get('pnl', 0) or 0:.4f}",
+                f"{t.get('pnl_pct', 0) or 0:.2f}",
+                t.get("status", ""),
+                t.get("exchange", ""),
+                (t.get("signal") or "")[:60],
+                t.get("opened_at", "")[:16],
+                t.get("closed_at", "")[:16] if t.get("closed_at") else "",
+            ])
+
+        csv_bytes = output.getvalue().encode("utf-8")
+        from telegram import InputFile
+        import io as _io
+        await msg.delete()
+        await update.effective_message.reply_document(
+            document=InputFile(_io.BytesIO(csv_bytes), filename=f"trades_{uid}.csv"),
+            caption=f"📊 <b>Trade History Export</b>\n{len(trades)} trades",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await msg.edit_text(
+            f"❌ <b>Export failed</b>\n\n<code>{str(e)[:200]}</code>",
+            parse_mode=ParseMode.HTML
+        )
+
+
+# ── /signals ─────────────────────────────────────────────────────────────────
+
+@require_granted
+async def signals_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show last 10 signals evaluated for this user with outcomes."""
+    uid  = update.effective_user.id
+    from database import get_signal_history
+    rows = get_signal_history(uid, limit=10)
+
+    if not rows:
+        await update.effective_message.reply_text(
+            "📡 No signal history yet. Signals are recorded once trading is active.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    lines = ["📡 <b>Last 10 Signals</b>\n"]
+    for r in rows:
+        icon = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(r["action"], "⚪")
+        traded = "✅ Traded" if r["resulted_in_trade"] else "⏭ Not traded"
+        lines.append(
+            f"{icon} <b>{r['symbol']}</b> — {r['action']} ({r['confidence']}%) — {traded}\n"
+            f"   <i>{r['reason'][:80]}</i>\n"
+            f"   <code>{r['created_at'][:16]}</code>"
+        )
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+# ── /status ───────────────────────────────────────────────────────────────────
+
+async def bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show platform-wide stats. Public for admins, basic for users."""
+    uid   = update.effective_user.id
+    from database import get_platform_stats
+    from backup import get_backup_list
+    import time
+
+    stats   = get_platform_stats()
+    backups = get_backup_list()
+    last_backup = backups[0]["created"] if backups else "Never"
+
+    if is_admin(uid):
+        text = (
+            f"🖥 <b>Bot Status</b>\n\n"
+            f"<b>Platform</b>\n"
+            f"  Users (with exchange):  <code>{stats['total_users']}</code>\n"
+            f"  Active subscribers:     <code>{stats['active_subs']}</code>\n"
+            f"  Trading right now:      <code>{stats['active_traders']}</code>\n\n"
+            f"<b>Today</b>\n"
+            f"  Open trades:            <code>{stats['open_trades']}</code>\n"
+            f"  Trades closed today:    <code>{stats['today_trades']}</code>\n"
+            f"  Platform PnL today:     <code>{'+'if stats['today_pnl']>=0 else ''}{stats['today_pnl']:.4f} USDT</code>\n\n"
+            f"<b>System</b>\n"
+            f"  Last DB backup:         <code>{last_backup}</code>\n"
+            f"  Backups stored:         <code>{len(backups)}</code>\n"
+        )
+    else:
+        text = (
+            f"🤖 <b>CryptoTradeBot — Status</b>\n\n"
+            f"  Active traders:    <code>{stats['active_traders']}</code>\n"
+            f"  Trades today:      <code>{stats['today_trades']}</code>\n\n"
+            f"Bot is online and running. ✅"
+        )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+# ── /user (admin) ─────────────────────────────────────────────────────────────
+
+async def user_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: look up full profile of any user by ID."""
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.effective_message.reply_text("🚫 Admin only.")
+        return
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Usage: <code>/user &lt;user_id&gt;</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.effective_message.reply_text("❌ Invalid user ID.")
+        return
+
+    from database import get_user_full_profile
+    profile = get_user_full_profile(target_id)
+    if not profile:
+        await update.effective_message.reply_text(f"❌ User <code>{target_id}</code> not found.", parse_mode=ParseMode.HTML)
+        return
+
+    u   = profile["user"]
+    s   = profile["settings"]
+    sub = profile["sub"]
+    tr  = profile["trades"]
+    uname  = f"@{u['username']}" if u.get("username") else str(target_id)
+    label  = EXCHANGE_LABELS.get(u.get("exchange",""), u.get("exchange","N/A"))
+    sub_label = "♾ Lifetime" if sub["type"] == "lifetime" else f"📅 {sub.get('expiry','N/A')} ({sub.get('days_left','?')}d left)" if sub["access"] else "❌ No access"
+
+    text = (
+        f"👤 <b>User Profile</b>\n\n"
+        f"ID:           <code>{target_id}</code>\n"
+        f"Username:     {uname}\n"
+        f"Access:       {sub_label}\n"
+        f"Exchange:     <code>{label}</code>\n"
+        f"Symbol:       <code>{s.get('symbol','N/A')}</code>\n"
+        f"Trade Mode:   <code>{s.get('trade_mode','auto').title()}</code>\n"
+        f"Trading ON:   <code>{'Yes' if s.get('trading_on') else 'No'}</code>\n\n"
+        f"<b>Trade Stats</b>\n"
+        f"  Total:    <code>{tr.get('total',0)}</code>\n"
+        f"  Wins:     <code>{tr.get('wins',0)}</code>\n"
+        f"  PnL:      <code>{'+'if tr.get('total_pnl',0)>=0 else ''}{tr.get('total_pnl',0):.4f} USDT</code>\n"
+        f"  Referrals: <code>{profile['referrals']}</code>"
+    )
+
+    keyboard = [[
+        InlineKeyboardButton("📩 Reply",          callback_data=f"admin_reply_{target_id}"),
+        InlineKeyboardButton("🔑 Grant Lifetime", callback_data=f"admin_grant_{target_id}"),
+    ]]
+    await update.effective_message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
+
+
+# ── /timezone ────────────────────────────────────────────────────────────────
+
+@require_granted
+async def timezone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Let users set their UTC offset for daily reports and alerts."""
+    uid = update.effective_user.id
+    if context.args:
+        try:
+            offset = int(context.args[0])
+            if not -12 <= offset <= 14:
+                raise ValueError()
+            from database import set_user_timezone
+            set_user_timezone(uid, offset)
+            sign = "+" if offset >= 0 else ""
+            await update.effective_message.reply_text(
+                f"✅ Timezone set to <b>UTC{sign}{offset}</b>\n\n"
+                f"Daily reports will be sent at <code>08:00 UTC{sign}{offset}</code>.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        except ValueError:
+            pass
+
+    # Show picker
+    offsets = [
+        ("UTC-12", -12), ("UTC-8", -8), ("UTC-5", -5), ("UTC-3", -3),
+        ("UTC+0 (London)", 0), ("UTC+1 (Lagos/Accra)", 1), ("UTC+2", 2),
+        ("UTC+3", 3), ("UTC+4", 4), ("UTC+5:30 → +5", 5),
+        ("UTC+6", 6), ("UTC+7", 7), ("UTC+8", 8), ("UTC+9", 9),
+        ("UTC+10", 10), ("UTC+12", 12),
+    ]
+    keyboard = []
+    for i in range(0, len(offsets), 2):
+        row = [InlineKeyboardButton(lbl, callback_data=f"tz_{off}") for lbl, off in offsets[i:i+2]]
+        keyboard.append(row)
+
+    await update.effective_message.reply_text(
+        "🕐 <b>Set Your Timezone</b>\n\nChoose your UTC offset for daily reports:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
+
 # ── /help ─────────────────────────────────────────────────────────────────────
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1258,16 +1558,25 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>📩 Support</b>\n"
         "  /support &lt;message&gt; — Contact the support team\n\n"
         "<b>🚨 Emergency</b>\n"
-        "  /panic         — Close all YOUR open trades immediately\n"
+        "  /panic         — Close all YOUR open trades immediately\n\n"
+        "<b>📊 Analytics</b>\n"
+        "  /positions     — Live open positions with unrealised PnL\n"
+        "  /signals       — Last 10 signals with outcomes\n"
+        "  /export        — Download trade history as CSV\n\n"
+        "<b>🌐 Preferences</b>\n"
+        "  /timezone      — Set your timezone for daily reports\n"
+        "  /status        — Bot and platform status\n"
     )
 
     admin_commands = (
         "\n<b>🔐 Admin Commands</b>\n"
         "  /grant &lt;user_id&gt;              — Grant lifetime access\n"
+        "  /user &lt;user_id&gt;               — Full user profile lookup\n"
         "  /reply &lt;user_id&gt; &lt;msg&gt;  — Reply to a user\n"
         "  /broadcast &lt;msg&gt;             — Message all subscribers\n"
         "  /subscribers                   — List all subscribers\n"
         "  /close                         — Emergency close ALL platform trades\n"
+        "  /status                        — Platform stats and health\n"
     )
 
     text = user_commands + (admin_commands if is_admin(uid) else "")
@@ -1316,6 +1625,19 @@ async def _show_symbol_picker(message, uid: int, page: int = 1):
 async def _activate_trading(context, uid: int, mode: str, usdt_balance: float):
     """Activate trading in the chosen mode and send a confirmation message."""
     s    = get_settings(uid)
+    user = get_user(uid)
+    # Guard: if no exchange connected, prompt setup
+    if not user or not user.get("api_key"):
+        await context.bot.send_message(
+            chat_id=uid,
+            text=(
+                "⚙️ <b>Exchange Not Connected</b>\n\n"
+                "You need to connect an exchange before trading.\n"
+                "Go to /settings → 🔑 Connect Exchange."
+            ),
+            parse_mode="HTML"
+        )
+        return
     update_setting(uid, "trading_on", 1)
     update_setting(uid, "trade_mode", mode)
 
@@ -1700,6 +2022,106 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML
             )
 
+    elif data.startswith("tz_"):
+        try:
+            offset = int(data[3:])
+            from database import set_user_timezone
+            set_user_timezone(uid, offset)
+            sign = "+" if offset >= 0 else ""
+            await query.message.reply_text(
+                f"✅ Timezone set to <b>UTC{sign}{offset}</b>\n"
+                f"Daily reports at <code>08:00 UTC{sign}{offset}</code>.",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            await query.message.reply_text(f"❌ Failed to set timezone: <code>{e}</code>", parse_mode=ParseMode.HTML)
+
+    elif data.startswith("admin_reply_"):
+        target_id = int(data[len("admin_reply_"):])
+        PENDING_INPUT[uid] = {"field": "admin_reply_msg", "target_id": target_id}
+        await query.message.reply_text(
+            f"📩 Type your reply message for user <code>{target_id}</code>:",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data.startswith("admin_grant_"):
+        if not is_admin(uid):
+            await query.answer("Not authorised.", show_alert=True)
+            return
+        target_id = int(data[len("admin_grant_"):])
+        upsert_user(target_id)
+        grant_user(target_id)
+        await query.message.reply_text(
+            f"✅ Lifetime access granted to <code>{target_id}</code>.",
+            parse_mode=ParseMode.HTML
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text="🎉 <b>Lifetime Access Granted!</b>\n\nAn admin has given you lifetime access to CryptoTradeBot.",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+
+    elif data.startswith("ob_exch_"):
+        # Onboarding: exchange selected
+        exch_id = data[8:]
+        from onboarding import onboard_step_symbol
+        PENDING_INPUT[uid] = {"field": "api_key", "exchange": exch_id, "onboarding": True}
+        passphrase_note = " (also needs a passphrase)" if exch_id in PASSPHRASE_EXCHANGES else ""
+        await query.message.reply_text(
+            f"🔑 <b>{EXCHANGE_LABELS.get(exch_id, exch_id)}</b>{passphrase_note}\n\n"
+            f"Please send your <b>API Key</b>:",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data.startswith("ob_sym_"):
+        # Onboarding: symbol selected
+        sym = data[7:]
+        if sym == "search":
+            PENDING_INPUT[uid] = {"field": "symbol_search", "onboarding": True}
+            await query.message.reply_text(
+                "🔍 Type the coin ticker (e.g. <code>BTC/USDT</code>):",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            update_setting(uid, "symbol", sym)
+            from onboarding import onboard_step_tpsl
+            await onboard_step_tpsl(context, uid)
+
+    elif data.startswith("ob_tpsl_"):
+        # Onboarding: risk profile selected
+        preset = data[8:]
+        presets = {
+            "conservative": (1.5, 0.8),
+            "balanced":     (2.0, 1.0),
+            "aggressive":   (3.0, 1.5),
+        }
+        if preset in presets:
+            tp, sl = presets[preset]
+            update_setting(uid, "take_profit", tp)
+            update_setting(uid, "stop_loss",   sl)
+            from onboarding import onboard_step_trade_mode
+            await onboard_step_trade_mode(context, uid)
+        else:
+            PENDING_INPUT[uid] = {"field": "take_profit", "onboarding": True}
+            await query.message.reply_text(
+                "🎯 Enter your Take Profit % (e.g. <code>2.0</code>):",
+                parse_mode=ParseMode.HTML
+            )
+
+    elif data.startswith("ob_mode_"):
+        # Onboarding: trade mode selected
+        mode = data[8:]
+        update_setting(uid, "trade_mode", mode)
+        from onboarding import onboard_done
+        await onboard_done(context, uid)
+
+    elif data.startswith("cmd_positions"):
+        from handlers import positions as _pos
+        await _pos(update, context)
+
     elif data == "noop":
         pass  # separator buttons — do nothing
 
@@ -1717,10 +2139,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎉 <b>Free Trial Activated!</b>\n\n"
                 f"You have <b>{FREE_TRIAL_DAYS} days</b> of full access.\n"
                 f"Trial expires: <code>{expiry}</code>\n\n"
-                f"Use /start to explore all features.\n"
-                f"Subscribe before your trial ends to keep access!",
+                f"Let\'s get you set up right away! 🚀",
                 parse_mode=ParseMode.HTML
             )
+            # Start onboarding flow for new trial users
+            from onboarding import start_onboarding
+            tg_user = query.from_user
+            await start_onboarding(context, uid, tg_user.first_name or "")
 
     elif data == "crypto_sub":
         # Legacy: show network picker
@@ -1924,6 +2349,8 @@ REPLY_BUTTON_COMMANDS = {
     "👥 Subscribers":  "cmd_subscribers",
     "🚨 Panic":        "cmd_panic",
     "📴 Close All":   "cmd_close",
+    "📂 Positions":   "cmd_positions",
+    "📡 Signals":     "cmd_signals",
     "👥 Subscribers":  "cmd_subscribers",
 }
 
@@ -2145,6 +2572,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text(f"⚠️ Validation failed: <code>{e}</code>", parse_mode=ParseMode.HTML)
         del PENDING_INPUT[uid]
 
+    elif field == "admin_reply_msg":
+        if not is_admin(uid):
+            del PENDING_INPUT[uid]
+            return
+        target_id = pi.get("target_id")
+        del PENDING_INPUT[uid]
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=f"📩 <b>Reply from Support</b>\n\n{text}",
+                parse_mode="HTML"
+            )
+            await update.effective_message.reply_text(
+                f"✅ Reply sent to <code>{target_id}</code>.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await update.effective_message.reply_text(
+                f"❌ Failed to send: <code>{e}</code>",
+                parse_mode="HTML"
+            )
+        return
+
     elif field == "support_msg":
         tg_user  = update.effective_user
         username = f"@{tg_user.username}" if tg_user.username else tg_user.full_name
@@ -2310,6 +2760,11 @@ def _build_button_map():
         "cmd_panic":       _make_cmd(panic),
         "cmd_close":       _make_cmd(close_all_cmd),
         "cmd_reply":       _make_cmd(reply_user),
+        "cmd_positions":   _make_cmd(positions),
+        "cmd_export":      _make_cmd(export_trades),
+        "cmd_signals":     _make_cmd(signals_history),
+        "cmd_status":      _make_cmd(bot_status),
+        "cmd_timezone":    _make_cmd(timezone_cmd),
     }
 
 

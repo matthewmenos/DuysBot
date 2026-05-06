@@ -13,7 +13,9 @@ from handlers import (
     grant, panic, close_all_cmd, reply_user,
     handle_message, handle_callback,
     subscribe, mystatus, subscribers,
-    dashboard, broadcast, referral
+    dashboard, broadcast, referral,
+    positions, export_trades, signals_history,
+    bot_status, user_lookup, timezone_cmd
 )
 from alerts_handlers import setalert, myalerts, delalert
 from scheduler import start_scheduler
@@ -46,6 +48,12 @@ def main():
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("referral", referral))
+    app.add_handler(CommandHandler("positions", positions))
+    app.add_handler(CommandHandler("export", export_trades))
+    app.add_handler(CommandHandler("signals", signals_history))
+    app.add_handler(CommandHandler("status", bot_status))
+    app.add_handler(CommandHandler("user", user_lookup))
+    app.add_handler(CommandHandler("timezone", timezone_cmd))
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("mystatus", mystatus))
     app.add_handler(CommandHandler("subscribers", subscribers))
