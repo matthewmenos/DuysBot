@@ -312,15 +312,33 @@ async def start_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    update_setting(uid, "trading_on", 1)
+    # ── Show mode picker: Auto or Manual ─────────────────────────────────────
+    cur_mode = s.get("trade_mode", "auto")
+    tp_label = f"{s['take_profit']}{'%' if s.get('tp_mode','pct')=='pct' else ' USDT'}"
+    sl_label = f"{s['stop_loss']}{'%' if s.get('sl_mode','pct')=='pct' else ' USDT'}"
+
+    keyboard = [
+        [InlineKeyboardButton(
+            f"🤖 Auto Trade{'  ✅' if cur_mode == 'auto' else ''}",
+            callback_data="trade_mode_auto"
+        )],
+        [InlineKeyboardButton(
+            f"👆 Manual Trade{'  ✅' if cur_mode == 'manual' else ''}",
+            callback_data="trade_mode_manual"
+        )],
+    ]
     await update.effective_message.reply_text(
-        f"✅ <b>Auto-trading ENABLED</b>\n\n"
-        f"📈 Symbol:          <code>{s['symbol']}</code>\n"
-        f"💵 Amount per trade: <code>{trade_amount} USDT</code>\n"
-        f"💰 Available USDT:  <code>{usdt_balance:.4f} USDT</code>\n"
-        f"🎯 Take Profit:     <code>{s['take_profit']}{'%' if s.get('tp_mode','pct')=='pct' else ' USDT'}</code>\n"
-        f"🛑 Stop Loss:       <code>{s['stop_loss']}{'%' if s.get('sl_mode','pct')=='pct' else ' USDT'}</code>\n\n"
-        "The bot will scan for signals every minute. 🤖",
+        f"⚡ <b>Start Trading — Choose Mode</b>\n\n"
+        f"Symbol:        <code>{s['symbol']}</code>\n"
+        f"Trade Amount:  <code>{trade_amount:.2f} USDT</code>\n"
+        f"USDT Balance:  <code>{usdt_balance:.8f}</code>\n"
+        f"Take Profit:   <code>{tp_label}</code>\n"
+        f"Stop Loss:     <code>{sl_label}</code>\n\n"
+        f"<b>🤖 Auto Trade</b> — Bot scans signals every 60s and buys automatically.\n\n"
+        f"<b>👆 Manual Trade</b> — You tap <b>🟢 Start Now</b> to buy whenever you're ready. "
+        f"TP/SL still close the trade automatically.\n\n"
+        f"{'✅ Current mode: <b>Auto</b>' if cur_mode == 'auto' else '✅ Current mode: <b>Manual</b>'} — tap to confirm or switch:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.HTML
     )
 
@@ -1293,6 +1311,53 @@ async def _show_symbol_picker(message, uid: int, page: int = 1):
     )
 
 
+# ── Shared trading activation helper ─────────────────────────────────────────
+
+async def _activate_trading(context, uid: int, mode: str, usdt_balance: float):
+    """Activate trading in the chosen mode and send a confirmation message."""
+    s    = get_settings(uid)
+    update_setting(uid, "trading_on", 1)
+    update_setting(uid, "trade_mode", mode)
+
+    tp_label = f"{s['take_profit']}{'%' if s.get('tp_mode','pct')=='pct' else ' USDT'}"
+    sl_label = f"{s['stop_loss']}{'%' if s.get('sl_mode','pct')=='pct' else ' USDT'}"
+
+    if mode == "auto":
+        mode_desc = (
+            "🤖 <b>Auto Trade Mode</b>\n"
+            "The bot scans for signals every 60 seconds and trades automatically."
+        )
+        action_btns = []
+    else:
+        mode_desc = (
+            "👆 <b>Manual Trade Mode</b>\n"
+            "Tap <b>🟢 Start Now</b> below whenever you want to place a trade."
+        )
+        action_btns = [[InlineKeyboardButton("🟢 Start Now — Buy Now", callback_data="manual_buy_now")]]
+
+    keyboard = action_btns + [
+        [InlineKeyboardButton("⏹ Stop Trading", callback_data="cmd_stop_trade"),
+         InlineKeyboardButton("📊 Chart",        callback_data="cmd_chart")],
+        [InlineKeyboardButton("💊 Health",       callback_data="cmd_health"),
+         InlineKeyboardButton("💰 Balance",      callback_data="cmd_balance")],
+    ]
+
+    await context.bot.send_message(
+        chat_id=uid,
+        text=(
+            f"✅ <b>Trading ENABLED</b>\n\n"
+            f"Symbol:        <code>{s['symbol']}</code>\n"
+            f"Trade Amount:  <code>{s['trade_amount']:.2f} USDT</code>\n"
+            f"USDT Balance:  <code>{usdt_balance:.8f}</code>\n"
+            f"Take Profit:   <code>{tp_label}</code>\n"
+            f"Stop Loss:     <code>{sl_label}</code>\n\n"
+            f"{mode_desc}"
+        ),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
+
+
 # ── Callback & Message Handlers ───────────────────────────────────────────────
 
 from utils import PENDING_INPUT  # shared across handlers and alerts_handlers
@@ -1393,6 +1458,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "ON ✅ — You'll receive suggestions for high-confidence signals." if new else "OFF ⬜ — No signal suggestions."
         await query.message.reply_text(
             f"{'✅' if new else '⬜'} <b>Signal Alerts: {status}</b>",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data == "toggle_trade_mode":
+        s   = get_settings(uid)
+        cur = s.get("trade_mode", "auto")
+        new = "manual" if cur == "auto" else "auto"
+        update_setting(uid, "trade_mode", new)
+        if new == "auto":
+            desc = (
+                "🤖 <b>Switched to Auto Trade Mode</b>\n\n"
+                "The bot will scan for signals every 60 seconds and "
+                "place trades automatically when confidence is high.\n\n"
+                "Tap ▶️ Start Trade to activate."
+            )
+        else:
+            desc = (
+                "👆 <b>Switched to Manual Trade Mode</b>\n\n"
+                "You decide when to buy. After starting, tap "
+                "<b>🟢 Start Now</b> to place a trade instantly.\n"
+                "TP/SL still trigger automatically to close the trade.\n\n"
+                "Tap ▶️ Start Trade to activate."
+            )
+        keyboard = [[InlineKeyboardButton("▶️ Start Trade", callback_data="cmd_start_trade")]]
+        await query.message.reply_text(
+            desc,
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML
         )
 

@@ -300,21 +300,58 @@ def switch_exchange(user_id: int, exchange: str) -> bool:
 
 # ── Settings helpers ──────────────────────────────────────────────────────────
 
-def get_settings(user_id: int):
+# Default values for every settings column — ensures .get() always works
+_SETTINGS_DEFAULTS = {
+    "take_profit":       2.0,
+    "stop_loss":         1.0,
+    "tp_mode":           "pct",
+    "sl_mode":           "pct",
+    "trade_amount":      10.0,
+    "symbol":            "BTC/USDT",
+    "trading_on":        0,
+    "confirm_trades":    0,
+    "trailing_stop":     0,
+    "trailing_stop_pct": 0.5,
+    "report_hour":       8,
+    "last_report_date":  None,
+    "signal_suggestions":1,
+    "multi_symbols":     None,
+    "trade_mode":        "auto",
+}
+
+
+def get_settings(user_id: int) -> dict:
+    """Return user settings as a plain dict with safe defaults for all columns."""
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
         if not row:
             conn.execute("INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", (user_id,))
             conn.commit()
             row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
-        return row
+    # Merge row into defaults so missing columns always have a safe value
+    result = dict(_SETTINGS_DEFAULTS)
+    if row:
+        for key in row.keys():
+            val = row[key]
+            if val is not None:
+                result[key] = val
+    result["user_id"] = user_id
+    return result
 
 
 def update_setting(user_id: int, key: str, value):
-    allowed = {"take_profit", "stop_loss", "trade_amount", "symbol", "trading_on"}
+    allowed = {
+        "take_profit", "stop_loss", "tp_mode", "sl_mode",
+        "trade_amount", "symbol", "trading_on",
+        "confirm_trades", "trailing_stop", "trailing_stop_pct",
+        "report_hour", "last_report_date",
+        "signal_suggestions", "multi_symbols", "trade_mode",
+    }
     if key not in allowed:
         raise ValueError(f"Unknown setting: {key}")
+    # Ensure row exists before updating
     with get_conn() as conn:
+        conn.execute("INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", (user_id,))
         conn.execute(f"UPDATE user_settings SET {key}=? WHERE user_id=?", (value, user_id))
 
 
@@ -358,14 +395,25 @@ def get_all_trading_users():
     """Return users who have trading enabled, valid credentials, and active access."""
     now = datetime.utcnow().isoformat()
     with get_conn() as conn:
-        return conn.execute("""
-            SELECT u.*, s.take_profit, s.stop_loss, s.trade_amount, s.symbol
+        rows = conn.execute("""
+            SELECT u.*, s.take_profit, s.stop_loss, s.trade_amount, s.symbol,
+                   s.tp_mode, s.sl_mode, s.trade_mode, s.confirm_trades,
+                   s.trailing_stop, s.trailing_stop_pct, s.signal_suggestions,
+                   s.multi_symbols
             FROM users u
             JOIN user_settings s ON u.user_id = s.user_id
             WHERE s.trading_on=1
               AND u.api_key != ''
               AND (u.granted=1 OR (u.sub_expiry IS NOT NULL AND u.sub_expiry > ?))
         """, (now,)).fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["api_key"]    = _dec(d.get("api_key", ""))
+        d["api_secret"] = _dec(d.get("api_secret", ""))
+        d["api_pass"]   = _dec(d.get("api_pass", ""))
+        result.append(d)
+    return result
 
 
 def save_support_message(user_id: int, message: str):
@@ -682,19 +730,28 @@ def get_all_alert_users():
 
 def get_all_subscribed_users():
     """
-    Return all users with active access (lifetime, paid sub, or active trial)
-    who have connected exchange credentials — for signal suggestions.
+    Return all users with active access and exchange credentials
+    as plain dicts with decrypted keys.
     """
     now = datetime.utcnow().isoformat()
     with get_conn() as conn:
-        return conn.execute("""
+        rows = conn.execute("""
             SELECT u.user_id, u.exchange, u.api_key, u.api_secret, u.api_pass,
-                   s.symbol, s.take_profit, s.stop_loss, s.trade_amount
+                   s.symbol, s.take_profit, s.stop_loss, s.trade_amount,
+                   s.signal_suggestions, s.trade_mode
             FROM users u
             LEFT JOIN user_settings s ON u.user_id = s.user_id
             WHERE u.api_key != ''
               AND (u.granted = 1 OR (u.sub_expiry IS NOT NULL AND u.sub_expiry > ?))
         """, (now,)).fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["api_key"]    = _dec(d.get("api_key", ""))
+        d["api_secret"] = _dec(d.get("api_secret", ""))
+        d["api_pass"]   = _dec(d.get("api_pass", ""))
+        result.append(d)
+    return result
 
 
 
