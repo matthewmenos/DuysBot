@@ -32,8 +32,12 @@ def _dec(val: str) -> str:
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # WAL mode: allows concurrent reads, survives crashes without data loss
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -46,7 +50,7 @@ def init_db():
             username            TEXT,
             granted             INTEGER DEFAULT 0,
             is_admin            INTEGER DEFAULT 0,
-            exchange            TEXT DEFAULT 'binance',
+            exchange            TEXT DEFAULT '',  -- empty = not yet connected
             api_key             TEXT DEFAULT '',
             api_secret          TEXT DEFAULT '',
             api_pass            TEXT DEFAULT '',
@@ -190,6 +194,9 @@ def init_db():
             "ALTER TABLE user_settings ADD COLUMN last_report_date TEXT DEFAULT NULL",
             "ALTER TABLE user_settings ADD COLUMN trade_mode TEXT DEFAULT 'auto'",
             "ALTER TABLE users ADD COLUMN tz_offset INTEGER DEFAULT 0",
+            # Reset exchange to '' for users who never connected an exchange
+            # (they were given 'binance' by default but have no API key)
+            "UPDATE users SET exchange='' WHERE api_key='' OR api_key IS NULL",
             """CREATE TABLE IF NOT EXISTS signal_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id           INTEGER NOT NULL,

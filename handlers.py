@@ -37,7 +37,8 @@ from logger_setup import report_error_to_admin, init_error_reporter
 from exchange import (
     get_exchange, fetch_balance, fetch_ticker, fetch_ohlcv,
     SUPPORTED_EXCHANGES, EXCHANGE_LABELS, close_all_positions,
-    fetch_usdt_balance, PASSPHRASE_EXCHANGES, check_key_format
+    fetch_usdt_balance, PASSPHRASE_EXCHANGES, check_key_format,
+    get_exchange_label
 )
 from strategy import generate_signal
 
@@ -164,9 +165,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     open_t = get_open_trades(user.id)
     trading_status = "🟢 Trading ON" if s and s["trading_on"] else "🔴 Trading OFF"
 
+    user_obj     = get_user(user.id)
+    has_exchange = bool(user_obj and user_obj.get("api_key"))
+    exch_label   = get_exchange_label(user_obj["exchange"] if user_obj else "")
+    exchange_line = f"Exchange: <code>{exch_label}</code>\n" if has_exchange else "Exchange: <code>Not Set ⚠️  — tap 🔑 Connect Exchange</code>\n"
+
     dashboard = (
         f"👋 Welcome back, <b>{user.first_name}</b>!\n\n"
         f"🤖 <b>CryptoTradeBot</b> is active.\n\n"
+        f"{exchange_line}"
         f"Status:  {trading_status}\n"
         f"Symbol:  <code>{s['symbol'] if s else 'BTC/USDT'}</code>\n"
         f"Open trades: <code>{len(open_t)}</code>\n\n"
@@ -178,24 +185,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trade_mode  = s.get("trade_mode", "auto") if s else "auto"
 
     inline_kb = [
-        [InlineKeyboardButton("📊 Dashboard",   callback_data="cmd_dashboard"),
-         InlineKeyboardButton("💰 Balance",     callback_data="cmd_balance")],
+        [InlineKeyboardButton("📊 Dashboard",      callback_data="cmd_dashboard"),
+         InlineKeyboardButton("💰 Balance",        callback_data="cmd_balance")],
     ]
     if is_trading:
         if trade_mode == "manual":
-            inline_kb += [[InlineKeyboardButton("🟢 Start Now — Buy Now", callback_data="manual_buy_now"),
-                           InlineKeyboardButton("⏹ Stop Trading",         callback_data="cmd_stop_trade")]]
+            inline_kb += [
+                [InlineKeyboardButton("🟢 Start Now — Buy Now", callback_data="manual_buy_now"),
+                 InlineKeyboardButton("⏹ Stop Trading",         callback_data="cmd_stop_trade")],
+                [InlineKeyboardButton("💊 Health",               callback_data="cmd_health"),
+                 InlineKeyboardButton("📂 Positions",            callback_data="cmd_positions")],
+            ]
         else:
-            inline_kb += [[InlineKeyboardButton("💊 Health",              callback_data="cmd_health"),
-                           InlineKeyboardButton("⏹ Stop Trading",         callback_data="cmd_stop_trade")]]
+            inline_kb += [
+                [InlineKeyboardButton("💊 Health",               callback_data="cmd_health"),
+                 InlineKeyboardButton("📂 Positions",            callback_data="cmd_positions")],
+                [InlineKeyboardButton("⏹ Stop Trading",         callback_data="cmd_stop_trade"),
+                 InlineKeyboardButton("🚨 Panic Close",          callback_data="cmd_panic")],
+            ]
     else:
-        inline_kb += [[InlineKeyboardButton("▶️ Start Trade",             callback_data="cmd_start_trade"),
-                       InlineKeyboardButton("⚙️ Settings",                callback_data="cmd_settings")]]
+        inline_kb += [
+            [InlineKeyboardButton("▶️ Start Trade",              callback_data="cmd_start_trade"),
+             InlineKeyboardButton("⚙️ Settings",                 callback_data="cmd_settings")],
+            [InlineKeyboardButton("🔑 Connect Exchange",          callback_data="set_exchange"),
+             InlineKeyboardButton("🪙 Set Symbol",               callback_data="set_symbol")],
+        ]
     inline_kb += [
-        [InlineKeyboardButton("📊 Chart",       callback_data="cmd_chart"),
-         InlineKeyboardButton("📈 PnL",         callback_data="cmd_pnl")],
-        [InlineKeyboardButton("📜 History",     callback_data="cmd_history"),
-         InlineKeyboardButton("❓ Help",         callback_data="cmd_help")],
+        [InlineKeyboardButton("📊 Chart",          callback_data="cmd_chart"),
+         InlineKeyboardButton("📈 PnL",            callback_data="cmd_pnl")],
+        [InlineKeyboardButton("📜 History",        callback_data="cmd_history"),
+         InlineKeyboardButton("📡 Signals",        callback_data="cmd_signals")],
+        [InlineKeyboardButton("💳 Subscribe",      callback_data="subscribe"),
+         InlineKeyboardButton("❓ Help",            callback_data="cmd_help")],
     ]
 
     await update.effective_message.reply_text(
@@ -223,7 +244,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         exch  = get_exchange(user["exchange"], user["api_key"], user["api_secret"], user["api_pass"])
         bal   = fetch_balance(exch)
-        label = EXCHANGE_LABELS.get(user["exchange"], user["exchange"].title())
+        label = get_exchange_label(user["exchange"])
 
         def fmt(val: float) -> str:
             """Format with up to 8 significant decimal places, no trailing zeros."""
@@ -379,7 +400,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     s   = get_settings(uid)
     u   = get_user(uid)
-    label = EXCHANGE_LABELS.get(u["exchange"] if u else "binance", "Not set")
+    label = get_exchange_label(u["exchange"] if u else "")
 
     # Get extra settings
     confirm_on    = bool(s.get("confirm_trades", 0))
@@ -675,8 +696,13 @@ async def exchanges(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["🏦 <b>Supported Exchanges</b>\n"]
     for key, label in EXCHANGE_LABELS.items():
         lines.append(f"  {label} — <code>{key}</code>")
-    lines.append("\nUse /settings → Connect Exchange to link your account.")
-    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    lines.append("\nTap a button below to connect your exchange:")
+    ex_kb = [[InlineKeyboardButton("🔑 Connect Exchange", callback_data="set_exchange")]]
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(ex_kb),
+        parse_mode=ParseMode.HTML
+    )
 
 
 # ── /support ──────────────────────────────────────────────────────────────────
@@ -1117,7 +1143,7 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbols = get_multi_symbols(uid) or [s["symbol"]]
 
     trading_icon = "🟢" if s["trading_on"] else "🔴"
-    label        = EXCHANGE_LABELS.get(user["exchange"], user["exchange"].title())
+    label        = get_exchange_label(user["exchange"])
 
     # Live balance
     balance_line = ""
@@ -1163,6 +1189,14 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{sub_line}\n"
         f"<b>📂 Open Trades ({len(open_t)})</b>\n{trade_lines}\n"
         f"{pnl_line}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📂 Positions",    callback_data="cmd_positions"),
+             InlineKeyboardButton("📊 Chart",        callback_data="cmd_chart")],
+            [InlineKeyboardButton("💰 Balance",      callback_data="cmd_balance"),
+             InlineKeyboardButton("⚙️ Settings",     callback_data="cmd_settings")],
+            [InlineKeyboardButton("🔄 Refresh",      callback_data="cmd_dashboard"),
+             InlineKeyboardButton("📡 Signals",      callback_data="cmd_signals")],
+        ]),
         parse_mode=ParseMode.HTML
     )
 
@@ -1224,6 +1258,9 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  Rewarded:           <code>{stats['rewarded']}</code>\n"
         f"  Pending (not paid): <code>{stats['pending']}</code>\n\n"
         f"Referral code: <code>{stats['code']}</code>",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📊 My Status", callback_data="cmd_mystatus"),
+        ]]),
         parse_mode=ParseMode.HTML
     )
 
@@ -1251,7 +1288,7 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.effective_message.reply_text("⏳ Fetching live prices...")
     try:
         exch   = get_exchange(user["exchange"], user["api_key"], user["api_secret"], user["api_pass"])
-        label  = EXCHANGE_LABELS.get(user["exchange"], user["exchange"].title())
+        label  = get_exchange_label(user["exchange"])
         lines  = [f"📂 <b>Open Positions — {label}</b>\n"]
 
 
@@ -1351,6 +1388,15 @@ async def export_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption=f"📊 <b>Trade History Export</b>\n{len(trades)} trades",
             parse_mode=ParseMode.HTML
         )
+        export_kb = [[
+            InlineKeyboardButton("📈 PnL Summary",  callback_data="cmd_pnl"),
+            InlineKeyboardButton("📋 Summary",      callback_data="cmd_summary"),
+        ]]
+        await update.effective_message.reply_text(
+            "Need anything else?",
+            reply_markup=InlineKeyboardMarkup(export_kb),
+            parse_mode=ParseMode.HTML
+        )
     except Exception as e:
         await msg.edit_text(
             f"❌ <b>Export failed</b>\n\n<code>{str(e)[:200]}</code>",
@@ -1383,7 +1429,15 @@ async def signals_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   <i>{r['reason'][:80]}</i>\n"
             f"   <code>{r['created_at'][:16]}</code>"
         )
-    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    sig_kb = [[
+        InlineKeyboardButton("📊 Chart",    callback_data="cmd_chart"),
+        InlineKeyboardButton("📂 Positions", callback_data="cmd_positions"),
+    ]]
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(sig_kb),
+        parse_mode=ParseMode.HTML
+    )
 
 
 # ── /status ───────────────────────────────────────────────────────────────────
@@ -1421,7 +1475,15 @@ async def bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"  Trades today:      <code>{stats['today_trades']}</code>\n\n"
             f"Bot is online and running. ✅"
         )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+    stat_kb = [[
+        InlineKeyboardButton("🔄 Refresh",       callback_data="cmd_status"),
+        InlineKeyboardButton("👥 Subscribers",   callback_data="cmd_subscribers"),
+    ]]
+    await update.effective_message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(stat_kb),
+        parse_mode=ParseMode.HTML
+    )
 
 
 # ── /user (admin) ─────────────────────────────────────────────────────────────
@@ -1455,7 +1517,7 @@ async def user_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub = profile["sub"]
     tr  = profile["trades"]
     uname  = f"@{u['username']}" if u.get("username") else str(target_id)
-    label  = EXCHANGE_LABELS.get(u.get("exchange",""), u.get("exchange","N/A"))
+    label  = get_exchange_label(u.get("exchange", ""))
     sub_label = "♾ Lifetime" if sub["type"] == "lifetime" else f"📅 {sub.get('expiry','N/A')} ({sub.get('days_left','?')}d left)" if sub["access"] else "❌ No access"
 
     text = (
@@ -2064,6 +2126,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+    elif data == "ob_start":
+        from onboarding import start_onboarding
+        tg_user = query.from_user
+        await start_onboarding(context, uid, tg_user.first_name or "")
+
     elif data.startswith("ob_exch_"):
         # Onboarding: exchange selected
         exch_id = data[8:]
@@ -2135,11 +2202,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             expiry = activate_trial(uid)
+            trial_kb = [[
+                InlineKeyboardButton("▶️ Start Setup", callback_data="ob_start"),
+                InlineKeyboardButton("⚙️ Settings",    callback_data="cmd_settings"),
+            ]]
             await query.message.reply_text(
                 f"🎉 <b>Free Trial Activated!</b>\n\n"
                 f"You have <b>{FREE_TRIAL_DAYS} days</b> of full access.\n"
                 f"Trial expires: <code>{expiry}</code>\n\n"
                 f"Let\'s get you set up right away! 🚀",
+                reply_markup=InlineKeyboardMarkup(trial_kb),
                 parse_mode=ParseMode.HTML
             )
             # Start onboarding flow for new trial users

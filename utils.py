@@ -30,9 +30,9 @@ def require_granted(func):
         keyboard = [[InlineKeyboardButton("💳 Subscribe — $12/month", callback_data="subscribe")]]
         await update.effective_message.reply_text(
             "🔒 <b>Access Required</b>\n\n"
-            "You need an active subscription to use DUYS Trading Bot.\n\n"
+            "You need an active subscription to use CryptoTradeBot.\n\n"
             "  • <b>Pay $12/month</b> via Paystack (card, mobile money, bank transfer)\n"
-            "  • Ask an admin @menosaguas to grant you lifetime access\n\n"
+            "  • Ask an admin to grant you lifetime access\n\n"
             f"Your Telegram ID: <code>{uid}</code>",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML
@@ -46,10 +46,14 @@ def require_creds(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid  = update.effective_user.id
         user = get_user(uid)
-        if not user or not user["api_key"]:
+        if not user or not user.get("api_key") or not user.get("exchange"):
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            keyboard = [[InlineKeyboardButton("🔑 Connect Exchange", callback_data="set_exchange")]]
             await update.effective_message.reply_text(
-                "⚙️ <b>No exchange connected</b>\n"
-                "Use /settings to connect your exchange API keys first.",
+                "⚙️ <b>No Exchange Connected</b>\n\n"
+                "You haven't connected an exchange yet.\n"
+                "Tap the button below to get started:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode=ParseMode.HTML
             )
             return

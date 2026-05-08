@@ -22,7 +22,13 @@ EXCHANGE_LABELS = {
     "okx":     "OKX ⚫",
     "mexc":    "MEXC 🟢",
     "kucoin":  "KuCoin 🟠",
+    "":        "Not Set ⚠️",
 }
+
+
+def get_exchange_label(exchange_id: str) -> str:
+    """Return display label. Shows 'Not Set' for empty/None exchange."""
+    return EXCHANGE_LABELS.get(exchange_id or "", "Not Set ⚠️")
 
 # Exchanges requiring a passphrase in addition to key + secret
 PASSPHRASE_EXCHANGES = {"okx", "kucoin"}
