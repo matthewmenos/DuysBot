@@ -194,9 +194,10 @@ def init_db():
             "ALTER TABLE user_settings ADD COLUMN last_report_date TEXT DEFAULT NULL",
             "ALTER TABLE user_settings ADD COLUMN trade_mode TEXT DEFAULT 'auto'",
             "ALTER TABLE users ADD COLUMN tz_offset INTEGER DEFAULT 0",
-            # Reset exchange to '' for users who never connected an exchange
-            # (they were given 'binance' by default but have no API key)
-            "UPDATE users SET exchange='' WHERE api_key='' OR api_key IS NULL",
+            # Reset exchange to '' ONLY for users who have no API key stored
+            # and whose exchange is still the old 'binance' default
+            # This preserves real exchange selections
+            "UPDATE users SET exchange='' WHERE (api_key='' OR api_key IS NULL) AND exchange='binance'",
             """CREATE TABLE IF NOT EXISTS signal_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id           INTEGER NOT NULL,
@@ -349,9 +350,11 @@ def get_settings(user_id: int) -> dict:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
         if not row:
+            # Insert with all defaults — never overwrites existing rows
             conn.execute("INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", (user_id,))
             conn.commit()
             row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
+    # Return a full dict — existing values take priority, defaults fill in missing columns
     # Merge row into defaults so missing columns always have a safe value
     result = dict(_SETTINGS_DEFAULTS)
     if row:

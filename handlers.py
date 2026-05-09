@@ -695,6 +695,8 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def exchanges(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["🏦 <b>Supported Exchanges</b>\n"]
     for key, label in EXCHANGE_LABELS.items():
+        if not key:  # skip "Not Set" placeholder
+            continue
         lines.append(f"  {label} — <code>{key}</code>")
     lines.append("\nTap a button below to connect your exchange:")
     ex_kb = [[InlineKeyboardButton("🔑 Connect Exchange", callback_data="set_exchange")]]
@@ -2356,9 +2358,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "set_exchange":
-        stored = get_stored_exchanges(uid)
+        stored  = get_stored_exchanges(uid)
         buttons = []
+        # Only show real exchanges — exclude the "" placeholder
         for key, label in EXCHANGE_LABELS.items():
+            if not key:  # skip "Not Set" placeholder
+                continue
             tag = " ✅" if key in stored else ""
             buttons.append([InlineKeyboardButton(f"{label}{tag}", callback_data=f"exch_{key}")])
         note = "✅ = credentials already saved" if stored else ""
