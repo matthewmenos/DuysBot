@@ -629,7 +629,22 @@ async def send_renewal_reminders(context):
         for user in users:
             uid = user["user_id"]
             day_word = f"{days} day" + ("s" if days > 1 else "")
-            keyboard = [[InlineKeyboardButton("💳 Renew Now", callback_data="subscribe")]]
+            # Build full renewal keyboard with all payment options
+            from config import CRYPTO_NETWORKS, FREE_TRIAL_DAYS
+            active_nets = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
+            renew_keyboard = [
+                [InlineKeyboardButton("── 💳 Renew via Paystack ─────────────", callback_data="noop")],
+                [InlineKeyboardButton("1 Month  $12",        callback_data="pay_1"),
+                 InlineKeyboardButton("3 Months $34",        callback_data="pay_3")],
+                [InlineKeyboardButton("6 Months $65 (best)", callback_data="pay_6")],
+            ]
+            if active_nets:
+                renew_keyboard += [[InlineKeyboardButton("── 🪙 Renew via Crypto (USDT) ───────", callback_data="noop")]]
+                for net_key, net_info in active_nets.items():
+                    renew_keyboard += [[InlineKeyboardButton(
+                        f"🪙 {net_info['label']} — USDT",
+                        callback_data=f"crypto_net_{net_key}"
+                    )]]
             try:
                 await context.bot.send_message(
                     chat_id=uid,
@@ -638,9 +653,10 @@ async def send_renewal_reminders(context):
                         f"Your CryptoTradeBot subscription expires in "
                         f"<b>{day_word}</b> on <code>{user['sub_expiry'][:10]}</code>.\n\n"
                         f"Renew now to avoid losing access and having open trades "
-                        f"go unmonitored."
+                        f"go unmonitored.\n\n"
+                        f"Choose a payment method below:"
                     ),
-                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    reply_markup=InlineKeyboardMarkup(renew_keyboard),
                     parse_mode="HTML"
                 )
                 logger.info(f"Renewal reminder sent to uid={uid} ({day_word} left)")

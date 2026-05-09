@@ -1754,19 +1754,43 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "subscribe":
-        keyboard = [
-            [InlineKeyboardButton("1 Month — $12",            callback_data="pay_1")],
-            [InlineKeyboardButton("3 Months — $34 (save $2)", callback_data="pay_3")],
-            [InlineKeyboardButton("6 Months — $65 (save $7)", callback_data="pay_6")],
+        # Show full payment modal: trial (if available) + Paystack + all crypto networks
+        trial_used_cb  = has_used_trial(uid)
+        active_nets_cb = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
+        full_keyboard  = []
+
+        if not trial_used_cb:
+            full_keyboard += [[InlineKeyboardButton(
+                f"🆓 {FREE_TRIAL_DAYS}-Day Free Trial  (No payment needed)",
+                callback_data="free_trial"
+            )]]
+
+        full_keyboard += [
+            [InlineKeyboardButton("── 💳 Pay via Paystack ──────────────", callback_data="noop")],
+            [InlineKeyboardButton("1 Month  $12",         callback_data="pay_1"),
+             InlineKeyboardButton("3 Months $34",         callback_data="pay_3")],
+            [InlineKeyboardButton("6 Months $65 (best)",  callback_data="pay_6")],
         ]
+
+        if active_nets_cb:
+            full_keyboard += [[InlineKeyboardButton("── 🪙 Pay via Crypto (USDT) ─────────", callback_data="noop")]]
+            for net_k, net_v in active_nets_cb.items():
+                full_keyboard += [[InlineKeyboardButton(
+                    f"🪙 {net_v['label']} — USDT",
+                    callback_data=f"crypto_net_{net_k}"
+                )]]
+
+        trial_note_cb = f"\n🆓 <b>{FREE_TRIAL_DAYS}-day free trial available!</b>\n" if not trial_used_cb else ""
+        crypto_note_cb = f"\n<b>🪙 Crypto:</b> {', '.join(v['label'] for v in active_nets_cb.values())}" if active_nets_cb else ""
+
         await query.message.reply_text(
-            "💳 <b>Subscribe to CryptoTradeBot</b>\n\n"
-            "Choose a plan:\n\n"
-            "  🔹 <b>1 Month</b>  — $12.00\n"
-            "  🔹 <b>3 Months</b> — $34.00 <i>(save $2)</i>\n"
-            "  🔹 <b>6 Months</b> — $65.00 <i>(save $7)</i>\n\n"
-            "Accepted: 💳 Card • 📱 Mobile Money • 🏦 Bank Transfer",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            f"🤖 <b>CryptoTradeBot — Subscribe / Renew</b>\n"
+            f"{trial_note_cb}\n"
+            f"<b>Plans:</b> 1mo $12 · 3mo $34 · 6mo $65\n"
+            f"<b>💳 Paystack</b> — Card, Mobile Money, Bank Transfer"
+            f"{crypto_note_cb}\n\n"
+            f"Choose a payment method:",
+            reply_markup=InlineKeyboardMarkup(full_keyboard),
             parse_mode=ParseMode.HTML
         )
 
