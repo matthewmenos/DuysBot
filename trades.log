@@ -1073,3 +1073,4 @@
 2026-05-05 21:52:31,251 | INFO     | trades | SIGNAL | user=6959276323 | DOGS/USDT | BUY | conf=40% | RSI neutral (38.0) | EMA9 > EMA21 (bullish) | MACD negative | Below lower BB (oversold zone) | Negative news sentiment (
 2026-05-05 21:53:28,584 | INFO     | trades | SIGNAL | user=6959276323 | DOGS/USDT | BUY | conf=40% | RSI neutral (38.0) | EMA9 > EMA21 (bullish) | MACD negative | Below lower BB (oversold zone) | Negative news sentiment (
 2026-05-05 21:54:38,432 | INFO     | trades | SIGNAL | user=6959276323 | DOGS/USDT | BUY | conf=40% | RSI neutral (36.73) | EMA9 > EMA21 (bullish) | MACD negative | Below lower BB (oversold zone) | Negative news sentiment 
+2026-05-09 16:15:46,280 | INFO     | trades | SIGNAL | user=6959276323 | DOGS/USDT | HOLD | conf=17% | RSI oversold (21.15) | EMA9 < EMA21 (bearish) | MACD negative | Below lower BB (oversold zone) | CMC bullish: 24h -2.7%,

@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DUYS Trading Bot — Automated Crypto Trading on Telegram</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:       #050810;
+  --bg2:      #090d1a;
+  --panel:    #0e1428;
+  --border:   #1a2540;
+  --accent:   #00e5ff;
+  --accent2:  #7b5cff;
+  --accent3:  #00ff9d;
+  --text:     #e8edf8;
+  --muted:    #5a6a8a;
+  --gold:     #ffc947;
+  --danger:   #ff4d6d;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: 'Syne', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  overflow-x: hidden;
+}
+
+/* Noise texture */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 999;
+}
+
+/* Grid lines */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 60px 60px;
+  opacity: 0.25;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ── NAV ── */
+nav {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.2rem 4rem;
+  background: rgba(5, 8, 16, 0.88);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  font-size: 1.25rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.logo-icon {
+  width: 36px; height: 36px;
+  background: linear-gradient(135deg, var(--accent2), var(--accent));
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+}
+
+.logo em { color: var(--accent); font-style: normal; }
+
+nav ul {
+  list-style: none;
+  display: flex;
+  gap: 2.5rem;
+}
+
+nav a {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: color 0.2s;
+}
+nav a:hover { color: var(--accent); }
+
+.nav-cta {
+  background: var(--accent) !important;
+  color: var(--bg) !important;
+  padding: 0.5rem 1.3rem;
+  border-radius: 6px;
+  font-weight: 700 !important;
+  letter-spacing: 0.02em !important;
+  transition: all 0.2s !important;
+}
+.nav-cta:hover {
+  background: #fff !important;
+  box-shadow: 0 4px 20px rgba(0,229,255,0.3);
+  transform: translateY(-1px);
+}
+
+/* ── SECTIONS ── */
+section { position: relative; z-index: 2; }
+
+/* ── HERO ── */
+#hero {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 9rem 4rem 5rem;
+  text-align: center;
+  overflow: hidden;
+}
+
+.hero-glow {
+  position: absolute;
+  top: 45%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 900px; height: 900px;
+  background: radial-gradient(ellipse, rgba(123,92,255,0.13) 0%, rgba(0,229,255,0.05) 45%, transparent 70%);
+  pointer-events: none;
+}
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(0,229,255,0.07);
+  border: 1px solid rgba(0,229,255,0.22);
+  border-radius: 100px;
+  padding: 0.38rem 1rem;
+  font-size: 0.75rem;
+  font-family: 'Space Mono', monospace;
+  color: var(--accent);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  margin-bottom: 2rem;
+  animation: fadeDown 0.6s ease both;
+}
+
+.badge-dot {
+  width: 7px; height: 7px;
+  background: var(--accent3);
+  border-radius: 50%;
+  animation: pulse 2s ease infinite;
+}
+
+h1 {
+  font-size: clamp(3rem, 7.5vw, 6.8rem);
+  font-weight: 800;
+  line-height: 1.0;
+  letter-spacing: -0.04em;
+  margin-bottom: 1.5rem;
+  animation: fadeUp 0.7s ease 0.1s both;
+}
+
+.grad-text {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 55%, var(--accent3) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-sub {
+  font-size: 1.1rem;
+  color: var(--muted);
+  max-width: 540px;
+  margin: 0 auto 2.8rem;
+  line-height: 1.72;
+  animation: fadeUp 0.7s ease 0.2s both;
+}
+
+.hero-btns {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  animation: fadeUp 0.7s ease 0.3s both;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.88rem 2.1rem;
+  border-radius: 8px;
+  font-size: 0.97rem;
+  font-weight: 700;
+  text-decoration: none;
+  transition: all 0.25s;
+  font-family: 'Syne', sans-serif;
+}
+
+.btn-grad {
+  background: linear-gradient(135deg, var(--accent2), var(--accent));
+  color: #fff;
+  box-shadow: 0 4px 28px rgba(123,92,255,0.35);
+}
+.btn-grad:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 40px rgba(0,229,255,0.42);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-2px);
+}
+
+/* ── TICKER ── */
+.ticker-wrap {
+  display: flex;
+  gap: 1.2rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 3.5rem;
+  animation: fadeUp 0.7s ease 0.45s both;
+}
+
+.tick {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.65rem 1.15rem;
+  font-family: 'Space Mono', monospace;
+  font-size: 0.8rem;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  transition: border-color 0.3s;
+  cursor: default;
+}
+.tick:hover { border-color: var(--accent); }
+.tick-sym  { font-weight: 700; }
+.tick-px   { color: var(--muted); }
+.up        { color: var(--accent3); font-weight: 700; }
+.dn        { color: var(--danger);  font-weight: 700; }
+
+/* ── STATS ── */
+.stats {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  z-index: 2;
+}
+
+.stat {
+  flex: 1;
+  min-width: 140px;
+  text-align: center;
+  padding: 2.5rem 1.5rem;
+  border-right: 1px solid var(--border);
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.5s, transform 0.5s;
+}
+.stat:last-child { border-right: none; }
+.stat.vis { opacity: 1; transform: translateY(0); }
+
+.stat-n {
+  font-family: 'Space Mono', monospace;
+  font-size: 2.4rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1;
+}
+.stat-l {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-top: 0.4rem;
+}
+
+/* ── FEATURES ── */
+#features {
+  padding: 7rem 4rem;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.s-label {
+  font-family: 'Space Mono', monospace;
+  font-size: 0.72rem;
+  color: var(--accent);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+
+.s-title {
+  font-size: clamp(1.9rem, 3.8vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin-bottom: 3.5rem;
+  max-width: 580px;
+}
+
+.feat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.feat {
+  background: var(--panel);
+  padding: 2.2rem;
+  position: relative;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(28px);
+  transition: opacity 0.5s, transform 0.5s, background 0.3s;
+}
+.feat.vis { opacity: 1; transform: translateY(0); }
+
+.feat::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent2), var(--accent));
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.feat:hover { background: #111928; }
+.feat:hover::after { opacity: 1; }
+
+.feat-ico  { font-size: 1.9rem; margin-bottom: 1.1rem; display: block; }
+.feat-name { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.55rem; }
+.feat-desc { font-size: 0.86rem; color: var(--muted); line-height: 1.65; }
+
+/* ── HOW ── */
+#how {
+  padding: 7rem 4rem;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.how-inner { max-width: 1100px; margin: 0 auto; }
+
+.steps {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 2rem;
+  margin-top: 3.5rem;
+  position: relative;
+}
+
+.steps::before {
+  content: '';
+  position: absolute;
+  top: 27px; left: 6rem; right: 6rem;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+
+.step {
+  text-align: center;
+  position: relative;
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.5s, transform 0.5s;
+}
+.step.vis { opacity: 1; transform: translateY(0); }
+
+.step-n {
+  width: 54px; height: 54px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Space Mono', monospace;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--accent);
+  margin: 0 auto 1.4rem;
+  transition: all 0.3s;
+}
+.step:hover .step-n {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+  box-shadow: 0 0 22px rgba(0,229,255,0.4);
+}
+
+.step h3 { font-size: 0.98rem; font-weight: 700; margin-bottom: 0.55rem; }
+.step p  { font-size: 0.84rem; color: var(--muted); line-height: 1.65; }
+
+/* ── EXCHANGES ── */
+#exchanges {
+  padding: 6rem 4rem;
+  max-width: 1100px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.exch-row {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 1.2rem;
+  margin-top: 3rem;
+}
+
+.exch {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 0.65rem 1.6rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  transition: all 0.25s;
+  cursor: default;
+}
+.exch:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-3px);
+  box-shadow: 0 6px 20px rgba(0,229,255,0.14);
+}
+
+/* ── PRICING ── */
+#pricing {
+  padding: 7rem 4rem;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+}
+
+.price-inner { max-width: 1000px; margin: 0 auto; text-align: center; }
+
+.plans {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+  margin-top: 3.5rem;
+}
+
+.plan {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 2.5rem 2rem;
+  position: relative;
+  opacity: 0;
+  transform: translateY(28px);
+  transition: opacity 0.5s, transform 0.5s, border-color 0.3s, box-shadow 0.3s;
+}
+.plan.vis { opacity: 1; transform: translateY(0); }
+.plan:hover {
+  transform: translateY(-6px) !important;
+  border-color: var(--accent2);
+  box-shadow: 0 20px 60px rgba(123,92,255,0.18);
+}
+
+.plan-hot {
+  border-color: var(--accent);
+  background: linear-gradient(160deg, rgba(0,229,255,0.04), rgba(123,92,255,0.04));
+}
+.plan-hot:hover {
+  box-shadow: 0 20px 60px rgba(0,229,255,0.22) !important;
+}
+
+.plan-badge {
+  position: absolute;
+  top: -13px; left: 50%;
+  transform: translateX(-50%);
+  background: linear-gradient(135deg, var(--accent2), var(--accent));
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.22rem 0.9rem;
+  border-radius: 100px;
+  white-space: nowrap;
+}
+
+.plan-name {
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 1rem;
+}
+
+.plan-price {
+  font-family: 'Space Mono', monospace;
+  font-size: 2.9rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.plan-price sup { font-size: 1.1rem; vertical-align: super; }
+
+.plan-per {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin: 0.5rem 0 1.8rem;
+}
+
+.plan-save { color: var(--accent3); font-weight: 700; margin-left: 0.4rem; }
+
+.plan-feats {
+  list-style: none;
+  margin-bottom: 2rem;
+  text-align: left;
+}
+.plan-feats li {
+  font-size: 0.86rem;
+  color: var(--muted);
+  padding: 0.42rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  border-bottom: 1px solid rgba(26,37,64,0.55);
+}
+.plan-feats li::before {
+  content: '✓';
+  color: var(--accent3);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* Payment pills */
+.pay-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  justify-content: center;
+  margin-top: 2.8rem;
+}
+.pay-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.42rem 0.9rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-family: 'Space Mono', monospace;
+}
+
+/* ── CTA ── */
+#cta {
+  padding: 9rem 4rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+#cta::before {
+  content: '';
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 700px; height: 700px;
+  background: radial-gradient(ellipse, rgba(123,92,255,0.14) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+#cta h2 {
+  font-size: clamp(2.5rem, 5.5vw, 4.2rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  margin-bottom: 1.2rem;
+  position: relative;
+}
+
+#cta p {
+  color: var(--muted);
+  font-size: 1rem;
+  margin-bottom: 2.5rem;
+  position: relative;
+}
+
+.tg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.8rem;
+  background: #229ED9;
+  color: #fff;
+  padding: 1rem 2.6rem;
+  border-radius: 10px;
+  font-size: 1.05rem;
+  font-weight: 700;
+  text-decoration: none;
+  transition: all 0.25s;
+  position: relative;
+  box-shadow: 0 4px 30px rgba(34,158,217,0.35);
+  font-family: 'Syne', sans-serif;
+}
+.tg-btn:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 50px rgba(34,158,217,0.5);
+}
+
+/* ── FOOTER ── */
+footer {
+  padding: 2.2rem 4rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: var(--bg);
+  position: relative;
+  z-index: 2;
+}
+footer a { color: var(--muted); text-decoration: none; transition: color 0.2s; }
+footer a:hover { color: var(--accent); }
+.footer-links { display: flex; gap: 2rem; }
+
+/* ── ANIMATIONS ── */
+@keyframes fadeDown {
+  from { opacity: 0; transform: translateY(-14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(22px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse {
+  0%,100% { opacity:1; box-shadow:0 0 0 0 rgba(0,255,157,0.45); }
+  50%      { opacity:0.7; box-shadow:0 0 0 6px rgba(0,255,157,0); }
+}
+
+/* ── RESPONSIVE ── */
+@media(max-width:900px) {
+  nav { padding: 1rem 1.5rem; }
+  nav ul { display: none; }
+  #hero,#features,#how,#exchanges,#pricing,#cta { padding-left:1.5rem; padding-right:1.5rem; }
+  .feat-grid { grid-template-columns: 1fr; }
+  .steps { grid-template-columns: 1fr 1fr; }
+  .steps::before { display: none; }
+  .plans { grid-template-columns: 1fr; }
+  footer { padding: 1.8rem 1.5rem; justify-content: center; text-align: center; }
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a class="logo" href="#">
+    <div class="logo-icon">🤖</div>
+    <em>DUYS</em>&nbsp;Trading
+  </a>
+  <ul>
+    <li><a href="#features">Features</a></li>
+    <li><a href="#how">How It Works</a></li>
+    <li><a href="#exchanges">Exchanges</a></li>
+    <li><a href="#pricing">Pricing</a></li>
+    <li><a href="#cta" class="nav-cta">Free Trial</a></li>
+  </ul>
+</nav>
+
+<!-- HERO -->
+<section id="hero">
+  <div class="hero-glow"></div>
+  <div>
+    <div class="hero-badge"><span class="badge-dot"></span>Live on Telegram &nbsp;·&nbsp; Trade 24/7</div>
+    <h1>Your Crypto Bot<br><span class="grad-text">Never Sleeps.</span></h1>
+    <p class="hero-sub">DUYS Trading Bot connects to your exchange, reads multi-layer signals in real time, and executes trades automatically — all inside Telegram.</p>
+    <div class="hero-btns">
+      <a href="#cta" class="btn btn-grad"><span>🚀</span> Start Free — 7 Days</a>
+      <a href="#features" class="btn btn-ghost"><span>→</span> See Features</a>
+    </div>
+    <div class="ticker-wrap" id="ticker"></div>
+  </div>
+</section>
+
+<!-- STATS -->
+<div class="stats">
+  <div class="stat" data-n="5">
+    <div class="stat-n" id="sn0">0</div>
+    <div class="stat-l">Exchanges</div>
+  </div>
+  <div class="stat" data-n="12">
+    <div class="stat-n" id="sn1">0</div>
+    <div class="stat-l">Signal Layers</div>
+  </div>
+  <div class="stat" data-n="7">
+    <div class="stat-n" id="sn2">0</div>
+    <div class="stat-l">Day Free Trial</div>
+  </div>
+  <div class="stat" data-n="60">
+    <div class="stat-n" id="sn3">0</div>
+    <div class="stat-l">Second Scan Cycle</div>
+  </div>
+  <div class="stat">
+    <div class="stat-n">24/7</div>
+    <div class="stat-l">Always Running</div>
+  </div>
+</div>
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="s-label">// What it does</div>
+  <h2 class="s-title">Everything a serious trader needs.</h2>
+  <div class="feat-grid">
+    <div class="feat"><span class="feat-ico">🤖</span><div class="feat-name">Auto & Manual Trading</div><p class="feat-desc">Bot scans every 60 seconds and trades automatically, or switch to manual mode and tap Start Now to enter on your terms. TP/SL always closes positions automatically.</p></div>
+    <div class="feat"><span class="feat-ico">📊</span><div class="feat-name">7-Layer Signal Engine</div><p class="feat-desc">RSI, EMA crossover, MACD, Bollinger Bands, volume spike, news sentiment, and CoinMarketCap data are combined into a single confidence score before any order fires.</p></div>
+    <div class="feat"><span class="feat-ico">🎯</span><div class="feat-name">Flexible TP / SL</div><p class="feat-desc">Set Take Profit and Stop Loss as a percentage or a fixed price. Enable trailing stop to lock in profits as price rises. All configurable per user, per trade.</p></div>
+    <div class="feat"><span class="feat-ico">🪙</span><div class="feat-name">Multi-Symbol Trading</div><p class="feat-desc">Trade up to 3 symbols simultaneously on the same exchange. Each position tracks its own TP/SL and signals independently, with no cross-contamination.</p></div>
+    <div class="feat"><span class="feat-ico">💡</span><div class="feat-name">Signal Suggestions</div><p class="feat-desc">Every 5 minutes the bot scans 12 top liquid pairs on your exchange and sends a suggestion when it finds a ≥70% confidence BUY signal on a coin you're not trading yet.</p></div>
+    <div class="feat"><span class="feat-ico">🔒</span><div class="feat-name">AES-256 Key Encryption</div><p class="feat-desc">API keys are encrypted at rest with Fernet AES-256 before being saved. Messages containing keys are deleted from Telegram chat immediately after entry.</p></div>
+    <div class="feat"><span class="feat-ico">📈</span><div class="feat-name">Daily PnL Reports</div><p class="feat-desc">Automatic daily summaries — trades taken, win/loss count, best and worst trade, weekly running total — delivered to your Telegram at a time you choose.</p></div>
+    <div class="feat"><span class="feat-ico">🔔</span><div class="feat-name">Custom Price Alerts</div><p class="feat-desc">Set price alerts on any coin with above/below conditions. Add a personal note. Get notified the moment your target is hit, then the alert clears automatically.</p></div>
+    <div class="feat"><span class="feat-ico">🚨</span><div class="feat-name">Panic Close</div><p class="feat-desc">One confirmation tap closes all your open positions at market price. Admins can close all trades across all users simultaneously with the /close command.</p></div>
+  </div>
+</section>
+
+<!-- HOW -->
+<section id="how">
+  <div class="how-inner">
+    <div class="s-label">// Getting started</div>
+    <h2 class="s-title">Up and trading in four steps.</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-n">01</div>
+        <h3>Open the Bot</h3>
+        <p>Find @DUYSTradingBot on Telegram and send /start. Claim your 7-day free trial or subscribe in seconds.</p>
+      </div>
+      <div class="step">
+        <div class="step-n">02</div>
+        <h3>Connect Exchange</h3>
+        <p>Enter your read + spot-trade API keys. They're encrypted immediately — never visible in chat history.</p>
+      </div>
+      <div class="step">
+        <div class="step-n">03</div>
+        <h3>Set Parameters</h3>
+        <p>Choose your symbol, trade amount, TP/SL, and trade mode. The guided onboarding walks you through each step.</p>
+      </div>
+      <div class="step">
+        <div class="step-n">04</div>
+        <h3>Start Trading</h3>
+        <p>Tap Start Trade. The bot handles everything — notifications for every buy, close, alert, and daily summary.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- EXCHANGES -->
+<section id="exchanges">
+  <div class="s-label">// Supported exchanges</div>
+  <h2 class="s-title" style="margin:0 auto 0.8rem;text-align:center;">Connect your exchange.</h2>
+  <p style="color:var(--muted);font-size:0.93rem;">Save keys for multiple exchanges. Switch instantly without re-entering credentials.</p>
+  <div class="exch-row">
+    <div class="exch">🟡 Binance</div>
+    <div class="exch">🔵 Bybit</div>
+    <div class="exch">⚫ OKX</div>
+    <div class="exch">🟢 MEXC</div>
+    <div class="exch">🟠 KuCoin</div>
+  </div>
+</section>
+
+<!-- PRICING -->
+<section id="pricing">
+  <div class="price-inner">
+    <div class="s-label">// Pricing</div>
+    <h2 class="s-title" style="margin:0 auto 0.6rem;text-align:center;">Simple, honest pricing.</h2>
+    <p style="color:var(--muted);font-size:0.93rem;">Start with a 7-day free trial. No card required. Cancel anytime.</p>
+    <div class="plans">
+      <div class="plan">
+        <div class="plan-name">Monthly</div>
+        <div class="plan-price"><sup>$</sup>12</div>
+        <div class="plan-per">per month</div>
+        <ul class="plan-feats">
+          <li>All 5 exchanges</li>
+          <li>Auto & manual trading</li>
+          <li>Signal suggestions</li>
+          <li>Daily PnL reports</li>
+          <li>Price alerts</li>
+        </ul>
+        <a href="#cta" class="btn btn-ghost" style="width:100%;justify-content:center;">Get Started</a>
+      </div>
+      <div class="plan plan-hot">
+        <div class="plan-badge">Most Popular</div>
+        <div class="plan-name">Quarterly</div>
+        <div class="plan-price"><sup>$</sup>34</div>
+        <div class="plan-per">per 3 months <span class="plan-save">Save $2</span></div>
+        <ul class="plan-feats">
+          <li>Everything in Monthly</li>
+          <li>Multi-symbol trading</li>
+          <li>Trade confirmation mode</li>
+          <li>Trailing stop loss</li>
+          <li>Export trade history CSV</li>
+        </ul>
+        <a href="#cta" class="btn btn-grad" style="width:100%;justify-content:center;">Get Started</a>
+      </div>
+      <div class="plan">
+        <div class="plan-name">Semi-Annual</div>
+        <div class="plan-price"><sup>$</sup>65</div>
+        <div class="plan-per">per 6 months <span class="plan-save">Save $7</span></div>
+        <ul class="plan-feats">
+          <li>Everything in Quarterly</li>
+          <li>Referral reward system</li>
+          <li>Priority support</li>
+          <li>Early feature access</li>
+          <li>Dedicated onboarding</li>
+        </ul>
+        <a href="#cta" class="btn btn-ghost" style="width:100%;justify-content:center;">Get Started</a>
+      </div>
+    </div>
+    <div class="pay-row">
+      <div class="pay-pill">💳 Card</div>
+      <div class="pay-pill">📱 Mobile Money</div>
+      <div class="pay-pill">🏦 Bank Transfer</div>
+      <div class="pay-pill">🪙 USDT — Aptos</div>
+      <div class="pay-pill">🪙 USDT — TRON</div>
+      <div class="pay-pill">🪙 USDT — BSC</div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section id="cta">
+  <h2>Start your free trial<br><span class="grad-text">right now.</span></h2>
+  <p>No card needed. 7 days of full access. Your settings persist forever.</p>
+  <a href="https://t.me/DUYSTradingBot" class="tg-btn">
+    ✈️ &nbsp;Open on Telegram
+  </a>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <a class="logo" href="#" style="font-size:1rem;gap:0.55rem;">
+    <div class="logo-icon" style="width:28px;height:28px;font-size:0.85rem;">🤖</div>
+    <em>DUYS</em>&nbsp;Trading
+  </a>
+  <div class="footer-links">
+    <a href="#features">Features</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#cta">Get Started</a>
+  </div>
+  <div>© 2026 DUYS Trading Bot. All rights reserved.</div>
+</footer>
+
+<script>
+// ── Live ticker ───────────────────────────────────────────────────────────────
+const coins = [
+  { s:"BTC",  p:68420.5,  c:2.34  },
+  { s:"ETH",  p:3621.8,   c:1.87  },
+  { s:"SOL",  p:174.2,    c:4.12  },
+  { s:"BNB",  p:610.4,    c:-0.54 },
+  { s:"XRP",  p:0.6124,   c:3.21  },
+];
+
+function fmtPrice(p) {
+  return p >= 1
+    ? p.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})
+    : p.toFixed(4);
+}
+
+function renderTicker() {
+  document.getElementById('ticker').innerHTML = coins.map(c =>
+    `<div class="tick">
+      <span class="tick-sym">${c.s}/USDT</span>
+      <span class="tick-px">$${fmtPrice(c.p)}</span>
+      <span class="${c.c>=0?'up':'dn'}">${c.c>=0?'+':''}${c.c.toFixed(2)}%</span>
+    </div>`
+  ).join('');
+}
+renderTicker();
+
+setInterval(() => {
+  coins.forEach(c => {
+    c.p = Math.max(0.01, c.p + (Math.random()-0.494)*c.p*0.0008);
+    c.c += (Math.random()-0.5)*0.04;
+  });
+  renderTicker();
+}, 2200);
+
+// ── Scroll animations ─────────────────────────────────────────────────────────
+const io = new IntersectionObserver(entries => {
+  entries.forEach((e, i) => {
+    if (e.isIntersecting) setTimeout(() => e.target.classList.add('vis'), i * 75);
+  });
+}, { threshold: 0.1 });
+
+document.querySelectorAll('.stat,.feat,.step,.plan').forEach(el => io.observe(el));
+
+// ── Counter animation ─────────────────────────────────────────────────────────
+function counter(el, target, dur=1300) {
+  const t0 = performance.now();
+  const tick = now => {
+    const p = Math.min((now-t0)/dur, 1);
+    el.textContent = Math.round((1-(1-p)**3)*target);
+    if (p < 1) requestAnimationFrame(tick);
+    else el.textContent = target;
+  };
+  requestAnimationFrame(tick);
+}
+
+const statsIO = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (!e.isIntersecting) return;
+    e.target.querySelectorAll('.stat[data-n]').forEach((s,i) => {
+      setTimeout(() => counter(s.querySelector('.stat-n'), +s.dataset.n), i*110);
+    });
+    statsIO.unobserve(e.target);
+  });
+}, { threshold: 0.3 });
+statsIO.observe(document.querySelector('.stats'));
+
+// ── Active nav highlight ──────────────────────────────────────────────────────
+const secs  = [...document.querySelectorAll('section[id]')];
+const links = [...document.querySelectorAll('nav a[href^="#"]')];
+window.addEventListener('scroll', () => {
+  const cur = secs.reduce((a,s) => window.scrollY >= s.offsetTop-130 ? s.id : a, '');
+  links.forEach(a => a.style.color = a.getAttribute('href')==='#'+cur ? 'var(--accent)' : '');
+}, {passive:true});
+</script>
+</body>
+</html>
