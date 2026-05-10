@@ -276,3 +276,30 @@ def generate_signal(ohlcv: list, symbol: str = "") -> dict:
         },
         "cmc": cmc,
     }
+
+
+def get_signals(symbols: list = None) -> list:
+    """
+    Get signals for a list of symbols. If no symbols provided, use default top coins.
+    Returns list of signal dicts.
+    """
+    if symbols is None:
+        symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
+    
+    signals = []
+    for symbol in symbols:
+        # For demo, generate mock OHLCV data or fetch real
+        # In real implementation, fetch from exchange
+        # Here, we'll use mock data for simplicity
+        import random
+        base_price = 50000 if symbol.startswith("BTC") else 3000 if symbol.startswith("ETH") else 100
+        ohlcv = []
+        for i in range(50):
+            price = base_price + random.uniform(-1000, 1000)
+            ohlcv.append([0, price, price+10, price-10, price, 1000000])
+        
+        signal = generate_signal(ohlcv, symbol)
+        signal['symbol'] = symbol
+        signals.append(signal)
+    
+    return signals

@@ -5,7 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DUYS Trading Bot — Automated Crypto Trading on Telegram</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
 <style>
 :root {
   --bg:       #050810;
@@ -25,7 +28,7 @@
 html { scroll-behavior: smooth; }
 
 body {
-  font-family: 'Syne', sans-serif;
+  font-family: 'Inter', 'Syne', sans-serif;
   background: var(--bg);
   color: var(--text);
   overflow-x: hidden;
@@ -763,6 +766,15 @@ footer a:hover { color: var(--accent); }
   </div>
 </section>
 
+<!-- CHARTS -->
+<section id="charts">
+  <div class="s-label">// Live Charts</div>
+  <h2 class="s-title">Track your trades in real-time.</h2>
+  <div style="max-width: 1200px; margin: 0 auto; padding: 2rem;">
+    <canvas id="priceChart" width="400" height="200"></canvas>
+  </div>
+</section>
+
 <!-- HOW -->
 <section id="how">
   <div class="how-inner">
@@ -963,6 +975,51 @@ window.addEventListener('scroll', () => {
   const cur = secs.reduce((a,s) => window.scrollY >= s.offsetTop-130 ? s.id : a, '');
   links.forEach(a => a.style.color = a.getAttribute('href')==='#'+cur ? 'var(--accent)' : '');
 }, {passive:true});
+
+// ── Chart integration ─────────────────────────────────────────────────────────
+async function loadChart(symbol = 'BTC') {
+  try {
+    const response = await fetch(`/api/chart_data/${symbol}`);
+    const data = await response.json();
+    const ctx = document.getElementById('priceChart').getContext('2d');
+    const ohlcData = data.timestamps.map((ts, i) => ({
+      x: ts,
+      o: data.open[i],
+      h: data.high[i],
+      l: data.low[i],
+      c: data.close[i]
+    }));
+    new Chart(ctx, {
+      type: 'candlestick',
+      data: {
+        datasets: [{
+          label: `${symbol}/USDT`,
+          data: ohlcData,
+          color: {
+            up: 'var(--accent3)',
+            down: 'var(--danger)',
+            unchanged: 'var(--muted)'
+          }
+        }]
+      },
+      options: {
+        responsive: true,
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: 'hour' }
+          }
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error loading chart:', error);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadChart();
+});
 </script>
 </body>
 </html>
