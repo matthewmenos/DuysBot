@@ -7,10 +7,7 @@ Run:
 """
 
 from flask import Flask, render_template, jsonify
-import os
-from config import BOT_TOKEN  # Assuming config has necessary settings
-from exchange import get_exchange  # Assuming exchange.py has get_exchange function
-from strategy import get_signals  # Assuming strategy.py has signal functions
+from strategy import get_signals
 import ccxt
 
 app = Flask(__name__, template_folder='.')
@@ -43,5 +40,10 @@ def signals():
     signals_data = get_signals()  # Implement in strategy.py
     return jsonify(signals_data)
 
+
+def run_web_app(host: str = '127.0.0.1', port: int = 5000) -> None:
+    app.run(host=host, port=port, debug=False, threaded=True)
+
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    run_web_app()
