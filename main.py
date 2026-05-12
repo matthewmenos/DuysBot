@@ -71,12 +71,10 @@ def main():
 
     # Start Paystack webhook server in background
     from webhook_server import run_webhook_server
-    from web_app import run_web_app
     from threading import Thread
     Thread(target=run_webhook_server, daemon=True).start()
 
-    # Start the website server alongside the bot
-    Thread(target=run_web_app, daemon=True).start()
+    # The web app is not started here to avoid running both the bot and website at the same time.
 
     # Initialise error reporter so scheduler can DM admins on errors
     from config import ADMIN_IDS as _ADMIN_IDS
