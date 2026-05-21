@@ -1,6 +1,6 @@
 """
 exchange.py - Unified exchange connector via ccxt
-Supports: Binance, Bybit, OKX, MEXC, KuCoin
+Supports: Binance, Bybit, OKX, MEXC, KuCoin, Coinbase Advanced, BingX, Gate.io
 """
 
 import ccxt
@@ -9,26 +9,55 @@ import logging
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXCHANGES = {
-    "binance": ccxt.binance,
-    "bybit":   ccxt.bybit,
-    "okx":     ccxt.okx,
-    "mexc":    ccxt.mexc,
-    "kucoin":  ccxt.kucoin,
+    "binance":  ccxt.binance,
+    "bybit":    ccxt.bybit,
+    "okx":      ccxt.okx,
+    "mexc":     ccxt.mexc,
+    "kucoin":   ccxt.kucoin,
+    "coinbase": ccxt.coinbase,   # Coinbase Advanced Trade
+    "bingx":    ccxt.bingx,
+    "gateio":   ccxt.gateio,
 }
 
 EXCHANGE_LABELS = {
-    "binance": "Binance 🟡",
-    "bybit":   "Bybit 🔵",
-    "okx":     "OKX ⚫",
-    "mexc":    "MEXC 🟢",
-    "kucoin":  "KuCoin 🟠",
-    "":        "Not Set ⚠️",
+    "binance":  "Binance 🟡",
+    "bybit":    "Bybit 🔵",
+    "okx":      "OKX ⚫",
+    "mexc":     "MEXC 🟢",
+    "kucoin":   "KuCoin 🟠",
+    "coinbase": "Coinbase 🔵",
+    "bingx":    "BingX 🟣",
+    "gateio":   "Gate.io 🔴",
+    "":         "Not Set ⚠️",
+}
+
+# Human-readable setup notes shown during API key onboarding
+EXCHANGE_NOTES = {
+    "coinbase": (
+        "Use <b>Coinbase Advanced Trade</b> API keys (not old Pro keys).\n"
+        "Create at: coinbase.com → Settings → API → New API Key.\n"
+        "Permissions needed: <b>View</b> + <b>Trade</b>."
+    ),
+    "bingx": (
+        "Create BingX API keys at: bingx.com → Account → API Management.\n"
+        "Permissions needed: <b>Read</b> + <b>Spot Trade</b>."
+    ),
+    "gateio": (
+        "Create Gate.io API keys at: gate.io → Account → API Management.\n"
+        "Permissions needed: <b>Read only</b> + <b>Spot Trade</b>."
+    ),
 }
 
 
 def get_exchange_label(exchange_id: str) -> str:
     """Return display label. Shows 'Not Set' for empty/None exchange."""
     return EXCHANGE_LABELS.get(exchange_id or "", "Not Set ⚠️")
+
+
+def get_exchange_note(exchange_id: str) -> str:
+    """Return extra setup note for exchanges that need special instructions."""
+    return EXCHANGE_NOTES.get(exchange_id or "", "")
+
 
 # Exchanges requiring a passphrase in addition to key + secret
 PASSPHRASE_EXCHANGES = {"okx", "kucoin"}

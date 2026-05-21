@@ -31,6 +31,18 @@ KUCOIN_API_KEY        = os.getenv("KUCOIN_API_KEY", "")
 KUCOIN_API_SECRET     = os.getenv("KUCOIN_API_SECRET", "")
 KUCOIN_API_PASSPHRASE = os.getenv("KUCOIN_API_PASSPHRASE", "")
 
+# Coinbase Advanced Trade
+COINBASE_API_KEY      = os.getenv("COINBASE_API_KEY",  "")
+COINBASE_API_SECRET   = os.getenv("COINBASE_API_SECRET", "")
+
+# BingX
+BINGX_API_KEY         = os.getenv("BINGX_API_KEY",  "")
+BINGX_API_SECRET      = os.getenv("BINGX_API_SECRET", "")
+
+# Gate.io
+GATEIO_API_KEY        = os.getenv("GATEIO_API_KEY",  "")
+GATEIO_API_SECRET     = os.getenv("GATEIO_API_SECRET", "")
+
 # ── MEXC API key expiry (MEXC keys expire 90 days from creation) ──────────────
 MEXC_KEY_EXPIRY_DAYS = 90
 

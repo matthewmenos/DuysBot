@@ -15,7 +15,8 @@ from handlers import (
     subscribe, mystatus, subscribers,
     dashboard, broadcast, referral,
     positions, export_trades, signals_history,
-    bot_status, user_lookup, timezone_cmd
+    bot_status, user_lookup, timezone_cmd,
+    arbitrage_cmd,
 )
 from alerts_handlers import setalert, myalerts, delalert
 from scheduler import start_scheduler
@@ -61,6 +62,40 @@ def main():
     app.add_handler(CommandHandler("setalert", setalert))
     app.add_handler(CommandHandler("myalerts", myalerts))
     app.add_handler(CommandHandler("delalert", delalert))
+    app.add_handler(CommandHandler("arbitrage", arbitrage_cmd))
+
+    from telegram import BotCommand
+
+    BOT_COMMANDS = [
+        BotCommand("start",       "🚀 Start / onboarding"),
+        BotCommand("balance",     "💰 View your exchange balance"),
+        BotCommand("start_trade", "▶️ Enable auto-trading"),
+        BotCommand("stop_trade",  "⏹ Disable auto-trading"),
+        BotCommand("positions",   "📂 View open positions"),
+        BotCommand("arbitrage",   "⚡ Scan for arbitrage opportunities"),
+        BotCommand("signals",     "📡 Recent trading signals"),
+        BotCommand("pnl",         "📊 Profit & loss summary"),
+        BotCommand("history",     "📜 Trade history"),
+        BotCommand("settings",    "⚙️ Bot settings"),
+        BotCommand("exchanges",   "🔗 Manage exchange API keys"),
+        BotCommand("setalert",    "🔔 Set a price alert"),
+        BotCommand("myalerts",    "📋 View your price alerts"),
+        BotCommand("delalert",    "🗑 Delete a price alert"),
+        BotCommand("summary",     "📈 Market summary"),
+        BotCommand("health",      "🩺 Bot health check"),
+        BotCommand("subscribe",   "💳 Subscribe / manage plan"),
+        BotCommand("mystatus",    "👤 Your subscription status"),
+        BotCommand("referral",    "🎁 Referral programme"),
+        BotCommand("support",     "🆘 Contact support"),
+        BotCommand("help",        "❓ Help & command list"),
+    ]
+
+    async def _post_init(application):
+        """Runs once after the bot is fully initialised — safe place to call API methods."""
+        await application.bot.set_my_commands(BOT_COMMANDS)
+        logger.info("Telegram command menu registered.")
+
+    app.post_init = _post_init
 
     # Callback and message handlers
     app.add_handler(CallbackQueryHandler(handle_callback))

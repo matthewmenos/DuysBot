@@ -38,7 +38,7 @@ from exchange import (
     get_exchange, fetch_balance, fetch_ticker, fetch_ohlcv,
     SUPPORTED_EXCHANGES, EXCHANGE_LABELS, close_all_positions,
     fetch_usdt_balance, PASSPHRASE_EXCHANGES, check_key_format,
-    get_exchange_label
+    get_exchange_label, get_exchange_note, get_min_trade_amount,
 )
 from strategy import generate_signal
 
@@ -406,6 +406,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     confirm_on    = bool(s.get("confirm_trades", 0))
     trailing_on   = bool(s.get("trailing_stop", 0))
     suggestions_on = bool(s.get("signal_suggestions", 1))
+    arb_alerts_on  = bool(s.get("arb_alerts", 1))
     multi_syms    = get_multi_symbols(uid)
 
     keyboard = [
@@ -439,6 +440,10 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(
             f"✅ Signal Alerts" if suggestions_on else "⬜ Signal Alerts",
             callback_data="toggle_suggestions"
+        ),
+         InlineKeyboardButton(
+            f"✅ Arb Alerts" if arb_alerts_on else "⬜ Arb Alerts",
+            callback_data="toggle_arb_alerts"
         )],
         [InlineKeyboardButton(
             f"🤖 Auto Trade" if s.get("trade_mode","auto") == "auto" else "👆 Manual Trade",
@@ -475,6 +480,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Confirm Trades:    <code>{'ON ✅' if confirm_on else 'OFF ⬜'}</code>\n"
         f"Trailing Stop:     <code>{'ON ✅' if trailing_on else 'OFF ⬜'}</code>\n"
         f"Signal Alerts:     <code>{'ON ✅' if suggestions_on else 'OFF ⬜'}</code>\n"
+        f"Arb Alerts:        <code>{'ON ✅' if arb_alerts_on else 'OFF ⬜'}</code>\n"
         f"Trade Mode:        <code>{'🤖 Auto' if s.get('trade_mode','auto')=='auto' else '👆 Manual'}</code>\n"
         f"{mexc_warning}\n"
         f"Tap a button to update:",
@@ -1627,6 +1633,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /positions     — Live open positions with unrealised PnL\n"
         "  /signals       — Last 10 signals with outcomes\n"
         "  /export        — Download trade history as CSV\n\n"
+        "<b>⚡ Arbitrage</b>\n"
+        "  /arbitrage     — Scan for cross-exchange &amp; triangular arbitrage\n"
+        "                   Choose tokens, enable/disable, run on-demand scans\n\n"
         "<b>🌐 Preferences</b>\n"
         "  /timezone      — Set your timezone for daily reports\n"
         "  /status        — Bot and platform status\n"
@@ -1870,6 +1879,97 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{'✅' if new else '⬜'} <b>Signal Alerts: {status}</b>",
             parse_mode=ParseMode.HTML
         )
+
+    elif data == "toggle_arb_alerts":
+        s   = get_settings(uid)
+        new = 0 if s.get("arb_alerts", 1) else 1
+        update_setting(uid, "arb_alerts", new)
+        status = "ON ✅ — You'll be notified when profitable arbitrage opportunities arise." if new else "OFF ⬜ — No arbitrage alerts."
+        await query.message.reply_text(
+            f"{'✅' if new else '⬜'} <b>Arb Alerts: {status}</b>",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data == "arb_toggle_enabled":
+        s   = get_settings(uid)
+        new = 0 if s.get("arb_enabled", 1) else 1
+        update_setting(uid, "arb_enabled", new)
+        icon   = "🟢" if new else "🔴"
+        status = "ENABLED — background scanning and /arbitrage are now active." if new else "DISABLED — no arb scans will run until you re-enable."
+        await query.message.reply_text(
+            f"{icon} <b>Arbitrage {status}</b>",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data == "arb_scan_now":
+        if not is_admin(uid) and not has_active_access(uid):
+            await query.answer("🔒 Subscription required.", show_alert=True)
+            return
+        wait_msg = await query.message.reply_text("🔍 Scanning for arbitrage opportunities…")
+        await _arb_run_scan(update, context, edit_msg=wait_msg)
+
+    elif data == "arb_sym_picker":
+        if not is_admin(uid) and not has_active_access(uid):
+            await query.answer("🔒 Subscription required.", show_alert=True)
+            return
+        chosen = _get_arb_symbols(uid)
+        selected = set(chosen) if chosen else set(ARB_SYMBOL_OPTIONS)
+        kb = _build_arb_symbol_keyboard(selected)
+        await query.message.reply_text(
+            "🪙 <b>Choose tokens to scan for arbitrage</b>\n\n"
+            "Tap a token to toggle it on/off.\n"
+            "Tap <b>Save &amp; Scan</b> when ready.\n\n"
+            "<i>Selecting fewer tokens makes scans faster.</i>",
+            reply_markup=kb,
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif data.startswith("arb_sym_"):
+        action = data[8:]   # e.g. "BTC/USDT", "all", "none", "save"
+        # Retrieve current in-progress selection from user state
+        state_key = f"arb_sel_{uid}"
+        current_raw = context.bot_data.get(state_key)
+        if current_raw is None:
+            existing = _get_arb_symbols(uid)
+            current_sel = set(existing) if existing else set(ARB_SYMBOL_OPTIONS)
+        else:
+            current_sel = set(current_raw)
+
+        if action == "all":
+            current_sel = set(ARB_SYMBOL_OPTIONS)
+            context.bot_data[state_key] = list(current_sel)
+            await query.edit_message_reply_markup(reply_markup=_build_arb_symbol_keyboard(current_sel))
+
+        elif action == "none":
+            current_sel = set()
+            context.bot_data[state_key] = list(current_sel)
+            await query.edit_message_reply_markup(reply_markup=_build_arb_symbol_keyboard(current_sel))
+
+        elif action == "save":
+            syms = sorted(current_sel) if current_sel else None
+            update_setting(uid, "arb_symbols", __import__("json").dumps(syms) if syms else None)
+            context.bot_data.pop(state_key, None)
+            sym_display = ", ".join(syms) if syms else "all defaults"
+            wait_msg = await query.message.reply_text(
+                f"✅ <b>Tokens saved:</b> <code>{sym_display}</code>\n\n"
+                "🔍 Running scan now…",
+                parse_mode=ParseMode.HTML,
+            )
+            await _arb_run_scan(update, context, edit_msg=wait_msg)
+
+        elif "/" in action:   # it's a symbol toggle like "BTC/USDT"
+            sym = action   # already the full symbol
+            if sym in current_sel:
+                current_sel.discard(sym)
+            else:
+                current_sel.add(sym)
+            context.bot_data[state_key] = list(current_sel)
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=_build_arb_symbol_keyboard(current_sel)
+                )
+            except Exception:
+                pass   # message unchanged — Telegram rejects identical markup edits
 
     elif data == "toggle_trade_mode":
         s   = get_settings(uid)
@@ -2395,8 +2495,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         exch_id = data[9:]
         PENDING_INPUT[uid] = {"field": "api_key", "exchange": exch_id}
         passphrase_note = " (also requires a passphrase)" if exch_id in PASSPHRASE_EXCHANGES else ""
+        extra_note = get_exchange_note(exch_id)
+        note_block = f"\n\nℹ️ {extra_note}" if extra_note else ""
         await query.message.reply_text(
-            f"🔑 <b>{EXCHANGE_LABELS.get(exch_id, exch_id)}</b>{passphrase_note}\n\n"
+            f"🔑 <b>{EXCHANGE_LABELS.get(exch_id, exch_id)}</b>{passphrase_note}{note_block}\n\n"
             f"Please send your <b>API Key</b>:",
             parse_mode=ParseMode.HTML
         )
@@ -2420,8 +2522,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             PENDING_INPUT[uid] = {"field": "api_key", "exchange": exch_id}
             passphrase_note = " (also requires a passphrase)" if exch_id in PASSPHRASE_EXCHANGES else ""
+            extra_note = get_exchange_note(exch_id)
+            note_block = f"\n\nℹ️ {extra_note}" if extra_note else ""
             await query.message.reply_text(
-                f"🔑 <b>{EXCHANGE_LABELS.get(exch_id, exch_id)}</b>{passphrase_note}\n\n"
+                f"🔑 <b>{EXCHANGE_LABELS.get(exch_id, exch_id)}</b>{passphrase_note}{note_block}\n\n"
                 f"Please send your <b>API Key</b>:",
                 parse_mode=ParseMode.HTML
             )
@@ -2866,8 +2970,317 @@ def _build_button_map():
         "cmd_signals":     _make_cmd(signals_history),
         "cmd_status":      _make_cmd(bot_status),
         "cmd_timezone":    _make_cmd(timezone_cmd),
+        "cmd_arbitrage":   _make_cmd(arbitrage_cmd),
     }
 
 
-# Build the map at module load time
+# Build the map after all handlers are defined
+# to avoid NameError for handler functions declared later in this module.
+# ═════════════════════════════════════════════════════════════════════════════
+
+import json as _json
+
+# All tokens the user can pick from for arbitrage scanning
+ARB_SYMBOL_OPTIONS: list[str] = [
+    "BTC/USDT",  "ETH/USDT",  "SOL/USDT",  "BNB/USDT",
+    "XRP/USDT",  "ADA/USDT",  "DOGE/USDT", "AVAX/USDT",
+    "LINK/USDT", "DOT/USDT",  "MATIC/USDT","LTC/USDT",
+    "UNI/USDT",  "ATOM/USDT", "TRX/USDT",  "NEAR/USDT",
+    "APT/USDT",  "OP/USDT",   "ARB/USDT",  "TON/USDT",
+    "FIL/USDT",  "INJ/USDT",  "SUI/USDT",  "SEI/USDT",
+]
+
+
+def _get_arb_symbols(uid: int) -> list[str] | None:
+    """Return the user\'s chosen arb symbols, or None (= scan defaults)."""
+    s = get_settings(uid)
+    raw = s.get("arb_symbols")
+    if not raw:
+        return None
+    try:
+        parsed = _json.loads(raw)
+        return parsed if isinstance(parsed, list) and parsed else None
+    except Exception:
+        return None
+
+
+def _build_arb_symbol_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
+    """Build a toggle keyboard for the arb symbol picker."""
+    rows = []
+    items = list(ARB_SYMBOL_OPTIONS)
+    for i in range(0, len(items), 3):
+        chunk = items[i:i+3]
+        row = []
+        for sym in chunk:
+            tick = "✅ " if sym in selected else ""
+            base = sym.split("/")[0]
+            row.append(InlineKeyboardButton(
+                f"{tick}{base}",
+                callback_data=f"arb_sym_{sym}"
+            ))
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("✅ Select All",  callback_data="arb_sym_all"),
+        InlineKeyboardButton("🗑 Clear All",  callback_data="arb_sym_none"),
+    ])
+    rows.append([
+        InlineKeyboardButton("💾 Save & Scan", callback_data="arb_sym_save"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def arbitrage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /arbitrage — show the arbitrage control panel.
+
+    From here the user can:
+    - Enable / disable background arb scanning
+    - Choose which tokens to scan
+    - Run an on-demand scan
+    """
+    import asyncio as _asyncio
+    from arbitrage import run_arbitrage_scan, MIN_PROFIT_PCT, ALL_SCANNABLE_SYMBOLS
+
+    uid = update.effective_user.id
+
+    if not is_admin(uid) and not has_active_access(uid):
+        keyboard = [[InlineKeyboardButton("💳 Subscribe", callback_data="subscribe")]]
+        await update.effective_message.reply_text(
+            "🔒 *Arbitrage scanning requires an active subscription.*\n\n"
+            "Use /subscribe to get started.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    s           = get_settings(uid)
+    arb_enabled = bool(s.get("arb_enabled", 1))
+    arb_alerts  = bool(s.get("arb_alerts",  1))
+    chosen      = _get_arb_symbols(uid)
+    sym_display = ", ".join(chosen) if chosen else "All defaults"
+
+    keyboard = [
+        [InlineKeyboardButton(
+            f"{'🟢 Arbitrage: ON' if arb_enabled else '🔴 Arbitrage: OFF'} — tap to toggle",
+            callback_data="arb_toggle_enabled"
+        )],
+        [InlineKeyboardButton(
+            f"{'🔔 Auto-Alerts: ON' if arb_alerts else '🔕 Auto-Alerts: OFF'}",
+            callback_data="toggle_arb_alerts"
+        )],
+        [InlineKeyboardButton("🪙 Choose Tokens to Scan", callback_data="arb_sym_picker")],
+        [InlineKeyboardButton("🔍 Scan Now",              callback_data="arb_scan_now")],
+    ]
+
+    status_icon = "🟢 ACTIVE" if arb_enabled else "🔴 DISABLED"
+    await update.effective_message.reply_text(
+        f"⚡ *Arbitrage Control Panel*\n\n"
+        f"Status:       `{status_icon}`\n"
+        f"Auto-alerts:  `{'ON' if arb_alerts else 'OFF'}`\n"
+        f"Tokens:       `{sym_display}`\n"
+        f"Min profit:   `{MIN_PROFIT_PCT}%` (after all fees)\n\n"
+        f"📊 *Cross-Exchange* — buy low on one exchange, sell high on another\n"
+        f"🔺 *Triangular* — exploit mispricing across 3 pairs on one exchange\n\n"
+        f"Tap a button to configure or scan:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _arb_run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, edit_msg=None):
+    """
+    Internal helper: build exchange pool, run scan, reply with results.
+    Called from both the 'Scan Now' button and the /arbitrage command.
+    """
+    import asyncio as _asyncio
+    from arbitrage import run_arbitrage_scan, MIN_PROFIT_PCT
+
+    uid = update.effective_user.id
+    msg_target = edit_msg or await (update.callback_query.message if update.callback_query
+                                    else update.effective_message).reply_text(
+        "🔍 Scanning… this may take 15–30 seconds.",
+    )
+
+    try:
+        s = get_settings(uid)
+        if not s.get("arb_enabled", 1):
+            await msg_target.edit_text(
+                "⚠️ Arbitrage is currently *disabled* for your account.\n"
+                "Use /arbitrage → toggle ON to re-enable.",
+                parse_mode="Markdown",
+            )
+            return
+
+        stored = get_stored_exchanges(uid)
+        if not stored:
+            await msg_target.edit_text(
+                "⚠️ *No exchange API keys found.*\n"
+                "Add at least one exchange via /exchanges, then try again.\n"
+                "_Tip: Connect 2+ exchanges to enable cross-exchange scanning._",
+                parse_mode="Markdown",
+            )
+            return
+
+        exchanges_pool: dict = {}
+        failed: list[str]   = []
+        for ex_id in stored:
+            try:
+                creds = get_exchange_creds(uid, ex_id)
+                if not creds:
+                    continue
+                ex = get_exchange(
+                    ex_id,
+                    creds.get("api_key",    ""),
+                    creds.get("api_secret", ""),
+                    creds.get("api_pass",   ""),
+                )
+                exchanges_pool[ex_id] = ex
+            except Exception as exc:
+                failed.append(ex_id)
+                logger.warning(f"[ARB-CMD] Could not build {ex_id} uid={uid}: {exc}")
+
+        if not exchanges_pool:
+            await msg_target.edit_text(
+                "❌ Could not connect to any of your exchanges.\n"
+                "Please check your API keys via /exchanges."
+            )
+            return
+
+        chosen  = _get_arb_symbols(uid)
+        result  = await _asyncio.to_thread(
+            run_arbitrage_scan, exchanges_pool, 1_000.0, chosen
+        )
+
+        cross_viable = [o for o in result["cross_exchange"] if o.viable]
+        tri_viable   = [o for o in result["triangular"]     if o.viable]
+        scan_errors  = result.get("scan_errors", [])
+
+        exchanges_str = ", ".join(f"`{e.upper()}`" for e in exchanges_pool)
+        sym_str = ", ".join(chosen) if chosen else "defaults"
+        header = (
+            f"⚡ *Arbitrage Scan Results*\n"
+            f"Exchanges: {exchanges_str}\n"
+            f"Tokens: `{sym_str}`\n"
+            f"Min net profit: `{MIN_PROFIT_PCT}%`\n\n"
+        )
+
+        # ── Non-fatal scan errors → surface to user ────────────────────────────
+        error_note = ""
+        if scan_errors:
+            error_note = (
+                f"\n⚠️ _{len(scan_errors)} symbol(s) could not be priced "
+                f"(network/listing issue) and were skipped._"
+            )
+            logger.warning(
+                f"[ARB-CMD] {len(scan_errors)} scan errors for uid={uid}: "
+                + "; ".join(f"{e.exchange}/{e.symbol}: {e.error}" for e in scan_errors[:5])
+            )
+            # Also report to admins if errors are exchange-wide (not just symbol-level)
+            exchange_wide = [e for e in scan_errors if e.symbol in ("cross_exchange","triangular")]
+            if exchange_wide:
+                try:
+                    await report_error_to_admin(
+                        context,
+                        Exception(exchange_wide[0].error),
+                        f"arb_scan uid={uid} {exchange_wide[0].exchange}"
+                    )
+                except Exception:
+                    pass
+
+        if result["viable_count"] == 0:
+            all_cross = sorted(result["cross_exchange"], key=lambda o: -o.net_profit_pct)
+            all_tri   = sorted(result["triangular"],     key=lambda o: -o.net_profit_pct)
+
+            near: list[str] = []
+            if all_cross:
+                b = all_cross[0]
+                near.append(
+                    f"  📊 {b.symbol} ({b.buy_exchange.upper()} → {b.sell_exchange.upper()})"
+                    f"  net `{b.net_profit_pct:.3f}%`"
+                )
+            if all_tri:
+                b = all_tri[0]
+                near.append(
+                    f"  🔺 {b.exchange.upper()} `{'→'.join(b.path)}`"
+                    f"  net `{b.net_profit_pct:.3f}%`"
+                )
+
+            body = "😴 *No viable opportunities right now.*\nSpreads are currently smaller than fees.\n"
+            if near:
+                body += "\n*Closest misses:*\n" + "\n".join(near)
+            body += "\n\n💡 _Auto-alerts fire every 3 min when opportunities appear._"
+
+            keyboard = [
+                [InlineKeyboardButton("🔄 Re-scan", callback_data="arb_scan_now")],
+                [InlineKeyboardButton("🪙 Change Tokens", callback_data="arb_sym_picker")],
+            ]
+            await msg_target.edit_text(
+                header + body + error_note,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        lines: list[str] = [header]
+
+        if cross_viable:
+            lines.append(f"📊 *Cross-Exchange ({len(cross_viable)} found):*\n")
+            for opp in cross_viable[:5]:
+                lines.append(
+                    f"✅ *{opp.symbol}*\n"
+                    f"  Buy  `{opp.buy_exchange.upper()}` @ `${opp.buy_price:,.4f}`\n"
+                    f"  Sell `{opp.sell_exchange.upper()}` @ `${opp.sell_price:,.4f}`\n"
+                    f"  Spread `{opp.spread_pct:.3f}%` · Fees `{opp.fee_pct:.3f}%` · "
+                    f"*Net `{opp.net_profit_pct:.3f}%`* (~`${opp.net_profit_usdt:.2f}` / $1k)\n"
+                )
+
+        if tri_viable:
+            lines.append(f"🔺 *Triangular ({len(tri_viable)} found):*\n")
+            for opp in tri_viable[:5]:
+                path_str = " \u2192 ".join(
+                    ("BUY " if d == "buy" else "SELL ") + sym
+                    for sym, d in zip(opp.path, opp.directions)
+                )
+                lines.append(
+                    f"\u2705 *{opp.exchange.upper()}*\n"
+                    f"  `{path_str}`\n"
+                    f"  *Net `{opp.net_profit_pct:.3f}%`* (~`${opp.net_profit_usdt:.2f}` / $1k)\n"
+                )
+        lines.append(
+            "⚠️ _Cross-exchange arb requires pre-funded balances on both sides._\n"
+            "⚠️ _Prices change in ms — verify live before executing manually._"
+        )
+        if failed:
+            _failed_str = ", ".join(failed)
+            lines.append(f"\n_Could not connect to: {_failed_str}_")
+        if error_note:
+            lines.append(error_note)
+
+        full_msg = "\n".join(lines)
+        if len(full_msg) > 4000:
+            full_msg = full_msg[:3970] + "\n\n_…truncated_"
+
+        keyboard = [
+            [InlineKeyboardButton("🔄 Re-scan",          callback_data="arb_scan_now")],
+            [InlineKeyboardButton("🪙 Change Tokens",    callback_data="arb_sym_picker")],
+        ]
+        await msg_target.edit_text(
+            full_msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    except Exception as e:
+        logger.error(f"_arb_run_scan error uid={uid}: {e}", exc_info=True)
+        try:
+            await msg_target.edit_text(f"❌ Scan failed: {e}")
+        except Exception:
+            pass
+        try:
+            await report_error_to_admin(context, e, f"arb_scan uid={uid}")
+        except Exception:
+            pass
+
+
+# Build the button map after all handlers are defined.
 BUTTON_MAP.update(_build_button_map())

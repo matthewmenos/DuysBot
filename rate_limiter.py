@@ -32,6 +32,7 @@ COOLDOWNS = {
     "dashboard":   5,
     "setalert":    2,
     "manual_buy":  5,    # prevent double-tap buys
+    "arbitrage":   30,   # scan is network-heavy; 30s cooldown
     "default":     2,
 }
 

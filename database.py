@@ -151,7 +151,10 @@ def init_db():
             last_report_date     TEXT    DEFAULT NULL,
             signal_suggestions   INTEGER DEFAULT 1,
             multi_symbols        TEXT    DEFAULT NULL,
-            trade_mode           TEXT    DEFAULT 'auto'
+            trade_mode           TEXT    DEFAULT 'auto',
+            arb_alerts           INTEGER DEFAULT 1,
+            arb_enabled          INTEGER DEFAULT 1,
+            arb_symbols          TEXT    DEFAULT NULL
         );
 
         CREATE TABLE IF NOT EXISTS exchange_creds (
@@ -198,6 +201,9 @@ def init_db():
             # and whose exchange is still the old 'binance' default
             # This preserves real exchange selections
             "UPDATE users SET exchange='' WHERE (api_key='' OR api_key IS NULL) AND exchange='binance'",
+            "ALTER TABLE user_settings ADD COLUMN arb_alerts INTEGER DEFAULT 1",
+            "ALTER TABLE user_settings ADD COLUMN arb_enabled INTEGER DEFAULT 1",
+            "ALTER TABLE user_settings ADD COLUMN arb_symbols TEXT DEFAULT NULL",
             """CREATE TABLE IF NOT EXISTS signal_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id           INTEGER NOT NULL,
@@ -342,6 +348,9 @@ _SETTINGS_DEFAULTS = {
     "signal_suggestions":1,
     "multi_symbols":     None,
     "trade_mode":        "auto",
+    "arb_alerts":        1,    # 1 = background arb scan + auto-alerts ON
+    "arb_enabled":       1,    # 1 = arbitrage feature enabled for this user
+    "arb_symbols":       None, # JSON list of symbols user wants scanned, None = defaults
 }
 
 
@@ -373,6 +382,7 @@ def update_setting(user_id: int, key: str, value):
         "confirm_trades", "trailing_stop", "trailing_stop_pct",
         "report_hour", "last_report_date",
         "signal_suggestions", "multi_symbols", "trade_mode",
+        "arb_alerts", "arb_enabled", "arb_symbols",
     }
     if key not in allowed:
         raise ValueError(f"Unknown setting: {key}")
@@ -765,7 +775,7 @@ def get_all_subscribed_users():
         rows = conn.execute("""
             SELECT u.user_id, u.exchange, u.api_key, u.api_secret, u.api_pass,
                    s.symbol, s.take_profit, s.stop_loss, s.trade_amount,
-                   s.signal_suggestions, s.trade_mode
+                   s.signal_suggestions, s.trade_mode, s.arb_alerts
             FROM users u
             LEFT JOIN user_settings s ON u.user_id = s.user_id
             WHERE u.api_key != ''

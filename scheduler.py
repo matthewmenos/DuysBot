@@ -10,6 +10,8 @@ scheduler.py - All automated background tasks:
 
 import json
 import logging
+import time
+import asyncio
 from datetime import datetime, timedelta
 from telegram.ext import ContextTypes
 
@@ -25,6 +27,7 @@ from database import (
 )
 from exchange import get_exchange, fetch_ohlcv, fetch_ticker, place_market_order
 from strategy import generate_signal
+from arbitrage import run_arbitrage_scan
 from logger_setup import (
     log_signal, log_trade_open, log_trade_close, report_error_to_admin
 )
@@ -35,8 +38,10 @@ logger = logging.getLogger(__name__)
 # ── Scheduler tick counters ───────────────────────────────────────────────────
 _suggestion_counter  = 0
 _key_check_counter   = 0
+_arb_counter         = 0
 SUGGESTION_INTERVAL  = 5    # every 5 ticks (5 min)
 KEY_CHECK_INTERVAL   = 10   # every 10 ticks (10 min)
+ARB_SCAN_INTERVAL    = 3    # every 3 ticks (3 min) — arb windows are short-lived
 CONFIRM_TIMEOUT_SECS = 30   # trade confirmation expires after 30s
 
 # Candidate symbols scanned for suggestions
@@ -58,9 +63,10 @@ _pending_confirms: dict = {}
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def start_scheduler(context: ContextTypes.DEFAULT_TYPE):
-    global _suggestion_counter, _key_check_counter
+    global _suggestion_counter, _key_check_counter, _arb_counter
     _suggestion_counter += 1
     _key_check_counter  += 1
+    _arb_counter        += 1
 
     # 1. Auto-trading
     for user in get_all_trading_users():
@@ -124,6 +130,13 @@ async def start_scheduler(context: ContextTypes.DEFAULT_TYPE):
             await check_sl_warnings(context)
         except Exception as e:
             logger.error(f"SL warning check error: {e}")
+
+    # 10. Arbitrage scan (every 3 min)
+    if _arb_counter % ARB_SCAN_INTERVAL == 0:
+        try:
+            await run_arbitrage_notifications(context)
+        except Exception as e:
+            logger.error(f"Arbitrage scan error: {e}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -444,107 +457,100 @@ async def _send_alert_notification(context, user_id, alert, current_price):
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def run_signal_suggestions(context):
-    import time
-    users   = get_all_subscribed_users()
-    now_ts  = time.time()
-    ohlcv_cache: dict = {}
+    """
+    Scan SUGGESTION_SYMBOLS for high-confidence signals and push Telegram
+    notifications to every subscribed user who has signal_suggestions ON.
+
+    Runs every SUGGESTION_INTERVAL ticks (~5 min by default).
+
+    Per-user, per-symbol cooldown (SUGGESTION_COOLDOWN_HOURS) prevents
+    repeated alerts for the same opportunity.  Signals are also written to
+    the database so /signals history is always up-to-date.
+    """
+    now_ts            = time.time()
+    ohlcv_cache: dict = {}   # keyed "exch_id:symbol" — shared across users
+    users             = get_all_subscribed_users()
 
     for user in users:
-        user       = dict(user)
-        user_id    = user["user_id"]
-        exch_id    = user["exchange"]
-        user_syms  = get_multi_symbols(user_id) or [user.get("symbol", "BTC/USDT")]
+        user    = dict(user)
+        user_id = user["user_id"]
+        exch_id = user.get("exchange", "")
+
         if not user.get("api_key"):
             continue
-
         s = get_settings(user_id)
         if not s or not s.get("signal_suggestions", 1):
             continue
 
         try:
-            exch = get_exchange(exch_id, user["api_key"], user["api_secret"], user["api_pass"])
-        except Exception:
+            exch = get_exchange(exch_id, user["api_key"], user["api_secret"], user.get("api_pass", ""))
+        except Exception as e:
+            logger.warning(f"[SIG] Could not connect {exch_id} uid={user_id}: {e}")
             continue
 
-        sent = 0
+        user_syms  = get_multi_symbols(user_id) or [user.get("symbol", "BTC/USDT")]
+        user_cache = _recently_suggested.setdefault(user_id, {})
+
         for symbol in SUGGESTION_SYMBOLS:
             if symbol in user_syms:
-                continue
-            user_cache = _recently_suggested.setdefault(user_id, {})
+                continue   # already trading it — skip suggestion
+
             if now_ts - user_cache.get(symbol, 0) < SUGGESTION_COOLDOWN_HOURS * 3600:
-                continue
+                continue   # too soon to repeat
 
             ck = f"{exch_id}:{symbol}"
             if ck not in ohlcv_cache:
                 try:
                     ohlcv_cache[ck] = fetch_ohlcv(exch, symbol, "1h", 100)
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"[SIG] OHLCV fetch failed {ck}: {e}")
                     ohlcv_cache[ck] = []
 
             if not ohlcv_cache[ck]:
                 continue
 
-            signal = generate_signal(ohlcv_cache[ck], symbol)
-            log_signal(symbol, signal["action"], signal["confidence"], signal["reason"], user_id)
-    log_signal_to_db(user_id, symbol, signal["action"], signal["confidence"], signal["reason"])
+            try:
+                signal = generate_signal(ohlcv_cache[ck], symbol)
+            except Exception as e:
+                logger.warning(f"[SIG] generate_signal error {symbol} uid={user_id}: {e}")
+                continue
 
-    # In manual mode — only manage TP/SL on existing trades; skip new auto entries
-    if trade_mode == "manual":
-        return
+            # Always persist to DB (populates /signals history)
+            try:
+                log_signal(symbol, signal["action"], signal["confidence"], signal["reason"], user_id)
+                log_signal_to_db(user_id, symbol, signal["action"], signal["confidence"], signal["reason"])
+            except Exception as e:
+                logger.warning(f"[SIG] DB log failed {symbol} uid={user_id}: {e}")
 
-    if signal["action"] == "BUY" and signal["confidence"] >= 50:
-        # Check balance before ordering
-        try:
-            balance = fetch_usdt_balance(exchange)
-            if trade_amt > balance:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        f"⚠️ <b>Insufficient Balance</b>\n\n"
-                        f"Wanted to buy <code>{symbol}</code> but your free USDT "
-                        f"(<code>{balance:.8f}</code>) is below your trade amount "
-                        f"(<code>{trade_amt:.2f} USDT</code>).\n\n"
-                        f"Top up or lower your trade amount via /settings."
-                    ),
-                    parse_mode="HTML"
-                )
-                return
-        except Exception as e:
-            logger.warning(f"Balance check failed uid={user_id}: {e}")
-            await report_error_to_admin(None, e, f"balance_check uid={user_id}")
+            action     = signal.get("action", "HOLD")
+            confidence = signal.get("confidence", 0)
 
-        # Minimum trade amount validation
-        try:
-            from exchange import get_min_trade_amount
-            min_amount = get_min_trade_amount(exchange, symbol)
-            if min_amount > 0 and trade_amt < min_amount:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        f"⚠️ <b>Trade Amount Too Small</b>\n\n"
-                        f"Your trade amount is <code>{trade_amt:.2f} USDT</code> but "
-                        f"the minimum for <code>{symbol}</code> on this exchange is "
-                        f"<code>{min_amount:.2f} USDT</code>.\n\n"
-                        f"Please increase your trade amount via /settings → 💵 Trade Amount."
-                    ),
-                    parse_mode="HTML"
-                )
-                return
-        except Exception as _min_err:
-            logger.warning(f"Min amount check failed: {_min_err}")
+            # Only notify on strong actionable signals
+            if action == "HOLD" or confidence < SUGGESTION_MIN_CONFIDENCE:
+                continue
 
-        # Deduplication: block if already have open trade on this symbol
-        if has_open_trade_for_symbol(user_id, symbol):
-            logger.info(f"Skipping buy — already have open trade on {symbol} uid={user_id}")
-            return
+            # Stamp cooldown before the send so parallel ticks cannot double-fire
+            user_cache[symbol] = now_ts
 
-        if confirm:
-            await _request_trade_confirmation(
-                context, user_id, symbol, "buy", current_price, trade_amt, signal, exchange_id
+            action_icon = "\U0001f4c8" if action == "BUY" else "\U0001f4c9"
+            filled      = confidence // 20
+            conf_bar    = "\U0001f7e9" * filled + "\u2b1c" * (5 - filled)
+
+            text = (
+                f"{action_icon} <b>Signal Alert \u2014 {action} {symbol}</b>\n\n"
+                f"Confidence: <code>{confidence}%</code>  {conf_bar}\n"
+                f"Reason:     <i>{signal.get('reason', 'N/A')}</i>\n\n"
+                f"\U0001f4a1 This is a <b>suggestion</b> \u2014 you are not currently trading {symbol}.\n"
+                f"Add it via /settings \u2192 \U0001f501 Multi-Symbol, or update your symbol and /start_trade.\n\n"
+                f"\U0001f515 Disable these alerts: /settings \u2192 Signal Alerts"
             )
-        else:
-            await _execute_buy(context, user_id, exchange, exchange_id, symbol, current_price, trade_amt, signal)
-
+            try:
+                await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                logger.info(f"[SIG] Sent signal alert uid={user_id} {symbol} {action} {confidence}%")
+            except Exception as e:
+                logger.warning(f"[SIG] Notification failed uid={user_id} {symbol}: {e}")
+                user_cache.pop(symbol, None)   # revert so it retries next tick
+                await report_error_to_admin(context, e, f"signal_notification uid={user_id} {symbol}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 4. Daily PnL report
@@ -756,3 +762,198 @@ async def check_sl_warnings(context):
                     logger.info(f"SL warning sent: uid={uid} trade={tid} {trade['symbol']}")
             except Exception as e:
                 logger.warning(f"SL warning check failed for trade {tid}: {e}")
+
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 10. Arbitrage scan + Telegram notifications
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Per-opportunity fingerprint tracking for arb alerts.
+# Maps user_id → {fingerprint: last_sent_ts}.
+# A fingerprint encodes the specific exchange pair + symbol (cross) or
+# exchange + path (triangular).  This means:
+#   • The SAME opportunity won't spam across back-to-back scan ticks
+#   • A DIFFERENT opportunity fires immediately regardless
+#   • Fingerprints expire after ARB_OPP_COOLDOWN_SECS so recurring opps re-alert
+_arb_seen:             dict[int, dict[str, float]] = {}
+ARB_OPP_COOLDOWN_SECS: int = 600   # 10 min per specific opportunity
+
+
+def _arb_fp_cross(opp) -> str:
+    return f"X:{opp.buy_exchange}>{opp.sell_exchange}:{opp.symbol}"
+
+
+def _arb_fp_tri(opp) -> str:
+    return f"T:{opp.exchange}:{'|'.join(opp.path)}"
+
+
+def _filter_new_arb_opps(
+    user_id: int,
+    opps_cross: list,
+    opps_tri:   list,
+    now:        float,
+) -> tuple[list, list]:
+    """
+    Return only opps whose fingerprint hasn't been notified within the cooldown
+    window.  Prunes expired fingerprints to keep the dict bounded.
+    """
+    seen = _arb_seen.setdefault(user_id, {})
+    for fp in [k for k, ts in list(seen.items()) if now - ts > ARB_OPP_COOLDOWN_SECS]:
+        del seen[fp]
+    new_cross = [o for o in opps_cross if _arb_fp_cross(o) not in seen]
+    new_tri   = [o for o in opps_tri   if _arb_fp_tri(o)   not in seen]
+    return new_cross, new_tri
+
+
+async def run_arbitrage_notifications(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Iterate every subscribed user, build their exchange pool, scan for
+    arbitrage opportunities, and fire a Telegram alert when viable ones exist.
+
+    The network-bound scan runs in a thread pool (asyncio.to_thread) so it
+    does not block the async event loop.
+    """
+    from database import get_all_subscribed_users
+    subscribed = get_all_subscribed_users()
+    if not subscribed:
+        return
+
+    for user in subscribed:
+        user_id = user["user_id"] if isinstance(user, dict) else int(user)
+        try:
+            await _run_arb_for_user(context, user_id)
+        except Exception as e:
+            logger.warning(f"[ARB] User {user_id} arb scan error: {e}")
+
+
+async def _run_arb_for_user(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    """
+    Background arb scan for one user.
+
+    New-opportunity model: each distinct opportunity (exchange+pair fingerprint)
+    has its own 10-min cooldown so:
+    • A brand-new opportunity notifies immediately even if another just fired
+    • The same stale opportunity doesn't spam every 3-min scan tick
+    • A previously seen opportunity re-alerts after ARB_OPP_COOLDOWN_SECS (10 min)
+    """
+    from database import get_stored_exchanges, get_exchange_creds, get_settings
+    from exchange import get_exchange as _get_exchange
+
+    now = time.time()
+
+    # ── User preferences ──────────────────────────────────────────────────────
+    settings = get_settings(user_id)
+    if not settings.get("arb_enabled", 1):
+        return
+    if not settings.get("arb_alerts", 1):
+        return
+
+    # ── Exchange credentials ──────────────────────────────────────────────────
+    stored = get_stored_exchanges(user_id)
+    if not stored:
+        return
+
+    exchanges: dict = {}
+    for ex_id in stored:
+        try:
+            creds = get_exchange_creds(user_id, ex_id)
+            if not creds:
+                continue
+            exchanges[ex_id] = _get_exchange(
+                ex_id,
+                creds.get("api_key",    ""),
+                creds.get("api_secret", ""),
+                creds.get("api_pass",   ""),
+            )
+        except Exception as e:
+            logger.debug(f"[ARB] Could not build {ex_id} uid={user_id}: {e}")
+
+    if not exchanges:
+        return
+
+    # ── Resolve user-selected symbols ─────────────────────────────────────────
+    import json as _json
+    user_symbols = None
+    raw_syms = settings.get("arb_symbols")
+    if raw_syms:
+        try:
+            parsed = _json.loads(raw_syms)
+            user_symbols = parsed if isinstance(parsed, list) and parsed else None
+        except Exception:
+            pass
+
+    # ── Blocking scan off the event loop ─────────────────────────────────────
+    try:
+        result = await asyncio.to_thread(run_arbitrage_scan, exchanges, 1_000.0, user_symbols)
+    except Exception as e:
+        logger.error(f"[ARB] Scan thread crashed uid={user_id}: {e}", exc_info=True)
+        await report_error_to_admin(context, e, f"arb_background_scan uid={user_id}")
+        return
+
+    # ── Surface exchange-wide scan errors to admin ────────────────────────────
+    scan_errors   = result.get("scan_errors", [])
+    exchange_wide = [e for e in scan_errors if e.symbol in ("cross_exchange", "triangular")]
+    if exchange_wide:
+        summary = "; ".join(f"{e.exchange}: {e.error}" for e in exchange_wide[:3])
+        logger.warning(f"[ARB] Exchange-wide errors uid={user_id}: {summary}")
+        await report_error_to_admin(context, Exception(summary), f"arb_scan uid={user_id}")
+    elif scan_errors:
+        logger.warning(
+            f"[ARB] {len(scan_errors)} symbol errors uid={user_id}: "
+            + "; ".join(f"{e.exchange}/{e.symbol}" for e in scan_errors[:5])
+        )
+
+    if result["viable_count"] == 0:
+        return
+
+    # ── Filter to only NEW (unseen/expired) opportunities ────────────────────
+    all_cross_viable = [o for o in result["cross_exchange"] if o.viable]
+    all_tri_viable   = [o for o in result["triangular"]     if o.viable]
+    new_cross, new_tri = _filter_new_arb_opps(user_id, all_cross_viable, all_tri_viable, now)
+
+    if not new_cross and not new_tri:
+        return   # all current opps were already notified recently
+
+    # ── Stamp fingerprints BEFORE sending ─────────────────────────────────────
+    seen = _arb_seen.setdefault(user_id, {})
+    for o in new_cross:
+        seen[_arb_fp_cross(o)] = now
+    for o in new_tri:
+        seen[_arb_fp_tri(o)] = now
+
+    # ── Build notification ────────────────────────────────────────────────────
+    total_new = len(new_cross) + len(new_tri)
+    lines: list[str] = [f"⚡ *{total_new} New Arbitrage Opportunity(ies) Found!*\n"]
+
+    if new_cross:
+        lines.append(f"📊 *Cross-Exchange ({len(new_cross)}):*")
+        for opp in new_cross[:4]:
+            lines.append(opp.summary())
+
+    if new_tri:
+        lines.append(f"🔺 *Triangular ({len(new_tri)}):*")
+        for opp in new_tri[:4]:
+            lines.append(opp.summary())
+
+    lines.append(
+        "\n💡 _Estimates based on $1 000 notional, all fees included._\n"
+        "⚠️ _Cross-exchange arb requires pre-funded balances on both sides._\n"
+        "👉 /arbitrage to scan on-demand, change tokens, or adjust settings."
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="\n".join(lines),
+            parse_mode="Markdown",
+        )
+        logger.info(f"[ARB] Notified uid={user_id}: {total_new} new opportunities "
+                    f"({len(new_cross)} cross, {len(new_tri)} tri)")
+    except Exception as e:
+        logger.warning(f"[ARB] Failed to send alert to uid={user_id}: {e}")
+        # Revert fingerprints so they re-attempt next tick
+        for o in new_cross:
+            seen.pop(_arb_fp_cross(o), None)
+        for o in new_tri:
+            seen.pop(_arb_fp_tri(o), None)

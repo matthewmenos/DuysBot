@@ -5,841 +5,422 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DUYS Trading Bot — Automated Crypto Trading on Telegram</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg:       #050810;
-  --bg2:      #090d1a;
-  --panel:    #0e1428;
-  --border:   #1a2540;
-  --accent:   #00e5ff;
-  --accent2:  #7b5cff;
-  --accent3:  #00ff9d;
-  --text:     #e8edf8;
-  --muted:    #5a6a8a;
-  --gold:     #ffc947;
-  --danger:   #ff4d6d;
+  --bg:      #04060f;
+  --bg2:     #070a16;
+  --panel:   #0b0f1e;
+  --border:  #141c32;
+  --accent:  #4fffb0;
+  --blue:    #3d8bff;
+  --purple:  #9b6fff;
+  --gold:    #ffd166;
+  --red:     #ff4f6d;
+  --text:    #dce6f0;
+  --muted:   #4a5878;
+  --mono:    'DM Mono', monospace;
+  --serif:   'DM Serif Display', serif;
+  --sans:    'DM Sans', sans-serif;
 }
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { scroll-behavior: smooth; }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);overflow-x:hidden;line-height:1.6}
 
-body {
-  font-family: 'Inter', 'Syne', sans-serif;
-  background: var(--bg);
-  color: var(--text);
-  overflow-x: hidden;
-}
-
-/* Noise texture */
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
-  pointer-events: none;
-  z-index: 999;
-}
-
-/* Grid lines */
-body::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image:
-    linear-gradient(var(--border) 1px, transparent 1px),
-    linear-gradient(90deg, var(--border) 1px, transparent 1px);
-  background-size: 60px 60px;
-  opacity: 0.25;
-  pointer-events: none;
-  z-index: 0;
-}
+/* grain overlay */
+body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.028'/%3E%3C/svg%3E");pointer-events:none;z-index:1000}
 
 /* ── NAV ── */
-nav {
-  position: fixed;
-  top: 0; left: 0; right: 0;
-  z-index: 100;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1.2rem 4rem;
-  background: rgba(5, 8, 16, 0.88);
-  backdrop-filter: blur(20px);
-  border-bottom: 1px solid var(--border);
-}
-
-.logo {
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
-  font-size: 1.25rem;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  text-decoration: none;
-  color: var(--text);
-}
-
-.logo-icon {
-  width: 36px; height: 36px;
-  background: linear-gradient(135deg, var(--accent2), var(--accent));
-  border-radius: 9px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.1rem;
-}
-
-.logo em { color: var(--accent); font-style: normal; }
-
-nav ul {
-  list-style: none;
-  display: flex;
-  gap: 2.5rem;
-}
-
-nav a {
-  color: var(--muted);
-  text-decoration: none;
-  font-size: 0.85rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  transition: color 0.2s;
-}
-nav a:hover { color: var(--accent); }
-
-.nav-cta {
-  background: var(--accent) !important;
-  color: var(--bg) !important;
-  padding: 0.5rem 1.3rem;
-  border-radius: 6px;
-  font-weight: 700 !important;
-  letter-spacing: 0.02em !important;
-  transition: all 0.2s !important;
-}
-.nav-cta:hover {
-  background: #fff !important;
-  box-shadow: 0 4px 20px rgba(0,229,255,0.3);
-  transform: translateY(-1px);
-}
+nav{position:fixed;top:0;left:0;right:0;z-index:200;display:flex;align-items:center;justify-content:space-between;padding:1.1rem 5rem;background:rgba(4,6,15,0.82);backdrop-filter:blur(24px);border-bottom:1px solid var(--border)}
+.logo{display:flex;align-items:center;gap:.75rem;text-decoration:none;color:var(--text)}
+.logo-mark{width:34px;height:34px;background:linear-gradient(135deg,var(--purple),var(--accent));border-radius:8px;display:grid;place-items:center;font-size:1rem;flex-shrink:0}
+.logo-name{font-family:var(--serif);font-size:1.3rem;letter-spacing:-.01em}
+.logo-name span{color:var(--accent)}
+nav ul{list-style:none;display:flex;gap:2.5rem}
+nav a{color:var(--muted);text-decoration:none;font-size:.82rem;font-weight:500;letter-spacing:.06em;text-transform:uppercase;transition:color .2s}
+nav a:hover{color:var(--accent)}
+.nav-cta{background:var(--accent)!important;color:var(--bg)!important;padding:.48rem 1.25rem;border-radius:6px;font-weight:600!important;letter-spacing:.03em!important}
+.nav-cta:hover{background:#fff!important;box-shadow:0 0 28px rgba(79,255,176,.3)}
 
 /* ── SECTIONS ── */
-section { position: relative; z-index: 2; }
+section{position:relative;z-index:2}
 
 /* ── HERO ── */
-#hero {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 9rem 4rem 5rem;
-  text-align: center;
-  overflow: hidden;
-}
+#hero{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:9rem 5rem 5rem;text-align:center;overflow:hidden}
+.hero-orbs{position:absolute;inset:0;pointer-events:none}
+.orb{position:absolute;border-radius:50%;filter:blur(90px);opacity:.18}
+.orb1{width:600px;height:600px;background:var(--purple);top:-100px;left:-100px}
+.orb2{width:500px;height:500px;background:var(--accent);bottom:-80px;right:-80px}
+.orb3{width:400px;height:400px;background:var(--blue);top:40%;left:50%;transform:translate(-50%,-50%)}
 
-.hero-glow {
-  position: absolute;
-  top: 45%; left: 50%;
-  transform: translate(-50%, -50%);
-  width: 900px; height: 900px;
-  background: radial-gradient(ellipse, rgba(123,92,255,0.13) 0%, rgba(0,229,255,0.05) 45%, transparent 70%);
-  pointer-events: none;
-}
+.hero-pill{display:inline-flex;align-items:center;gap:.5rem;background:rgba(79,255,176,.07);border:1px solid rgba(79,255,176,.2);border-radius:100px;padding:.35rem 1.1rem;font-family:var(--mono);font-size:.72rem;color:var(--accent);letter-spacing:.1em;text-transform:uppercase;margin-bottom:2.2rem;animation:fadeDown .6s ease both}
+.pill-dot{width:6px;height:6px;background:var(--accent);border-radius:50%;animation:blink 2s ease infinite}
 
-.hero-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: rgba(0,229,255,0.07);
-  border: 1px solid rgba(0,229,255,0.22);
-  border-radius: 100px;
-  padding: 0.38rem 1rem;
-  font-size: 0.75rem;
-  font-family: 'Space Mono', monospace;
-  color: var(--accent);
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  margin-bottom: 2rem;
-  animation: fadeDown 0.6s ease both;
-}
+h1{font-family:var(--serif);font-size:clamp(3.2rem,8vw,7rem);font-weight:400;line-height:1.02;letter-spacing:-.02em;margin-bottom:1.6rem;animation:fadeUp .7s ease .1s both}
+h1 em{font-style:italic;color:var(--accent)}
 
-.badge-dot {
-  width: 7px; height: 7px;
-  background: var(--accent3);
-  border-radius: 50%;
-  animation: pulse 2s ease infinite;
-}
+.hero-sub{font-size:1.05rem;color:var(--muted);max-width:500px;margin:0 auto 3rem;line-height:1.75;animation:fadeUp .7s ease .2s both}
 
-h1 {
-  font-size: clamp(3rem, 7.5vw, 6.8rem);
-  font-weight: 800;
-  line-height: 1.0;
-  letter-spacing: -0.04em;
-  margin-bottom: 1.5rem;
-  animation: fadeUp 0.7s ease 0.1s both;
-}
+.hero-btns{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;animation:fadeUp .7s ease .3s both}
+.btn{display:inline-flex;align-items:center;gap:.55rem;padding:.9rem 2.2rem;border-radius:8px;font-size:.95rem;font-weight:600;text-decoration:none;transition:all .25s;font-family:var(--sans)}
+.btn-primary{background:var(--accent);color:var(--bg);box-shadow:0 4px 30px rgba(79,255,176,.28)}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 48px rgba(79,255,176,.42)}
+.btn-outline{background:transparent;color:var(--text);border:1px solid var(--border)}
+.btn-outline:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-2px)}
 
-.grad-text {
-  background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 55%, var(--accent3) 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
+/* ticker */
+.ticker{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;margin-top:3.5rem;animation:fadeUp .7s ease .42s both}
+.tick{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:.6rem 1.1rem;font-family:var(--mono);font-size:.78rem;display:flex;align-items:center;gap:.7rem;transition:border-color .25s;cursor:default}
+.tick:hover{border-color:var(--accent)}
+.tick-sym{font-weight:500;color:var(--text)}
+.tick-px{color:var(--muted)}
+.up{color:var(--accent);font-weight:500}
+.dn{color:var(--red);font-weight:500}
 
-.hero-sub {
-  font-size: 1.1rem;
-  color: var(--muted);
-  max-width: 540px;
-  margin: 0 auto 2.8rem;
-  line-height: 1.72;
-  animation: fadeUp 0.7s ease 0.2s both;
-}
+/* ── STATS BAR ── */
+.stats-bar{display:flex;justify-content:center;flex-wrap:wrap;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--bg2);position:relative;z-index:2}
+.stat{flex:1;min-width:130px;text-align:center;padding:2.4rem 1rem;border-right:1px solid var(--border);opacity:0;transform:translateY(16px);transition:opacity .5s,transform .5s}
+.stat:last-child{border-right:none}
+.stat.vis{opacity:1;transform:translateY(0)}
+.stat-n{font-family:var(--mono);font-size:2.2rem;font-weight:500;color:var(--accent);line-height:1}
+.stat-l{font-size:.73rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:.4rem}
 
-.hero-btns {
-  display: flex;
-  gap: 1rem;
-  justify-content: center;
-  flex-wrap: wrap;
-  animation: fadeUp 0.7s ease 0.3s both;
-}
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-  padding: 0.88rem 2.1rem;
-  border-radius: 8px;
-  font-size: 0.97rem;
-  font-weight: 700;
-  text-decoration: none;
-  transition: all 0.25s;
-  font-family: 'Syne', sans-serif;
-}
-
-.btn-grad {
-  background: linear-gradient(135deg, var(--accent2), var(--accent));
-  color: #fff;
-  box-shadow: 0 4px 28px rgba(123,92,255,0.35);
-}
-.btn-grad:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 40px rgba(0,229,255,0.42);
-}
-
-.btn-ghost {
-  background: transparent;
-  color: var(--text);
-  border: 1px solid var(--border);
-}
-.btn-ghost:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  transform: translateY(-2px);
-}
-
-/* ── TICKER ── */
-.ticker-wrap {
-  display: flex;
-  gap: 1.2rem;
-  justify-content: center;
-  flex-wrap: wrap;
-  margin-top: 3.5rem;
-  animation: fadeUp 0.7s ease 0.45s both;
-}
-
-.tick {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 0.65rem 1.15rem;
-  font-family: 'Space Mono', monospace;
-  font-size: 0.8rem;
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  transition: border-color 0.3s;
-  cursor: default;
-}
-.tick:hover { border-color: var(--accent); }
-.tick-sym  { font-weight: 700; }
-.tick-px   { color: var(--muted); }
-.up        { color: var(--accent3); font-weight: 700; }
-.dn        { color: var(--danger);  font-weight: 700; }
-
-/* ── STATS ── */
-.stats {
-  display: flex;
-  justify-content: center;
-  flex-wrap: wrap;
-  background: var(--bg2);
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  position: relative;
-  z-index: 2;
-}
-
-.stat {
-  flex: 1;
-  min-width: 140px;
-  text-align: center;
-  padding: 2.5rem 1.5rem;
-  border-right: 1px solid var(--border);
-  opacity: 0;
-  transform: translateY(18px);
-  transition: opacity 0.5s, transform 0.5s;
-}
-.stat:last-child { border-right: none; }
-.stat.vis { opacity: 1; transform: translateY(0); }
-
-.stat-n {
-  font-family: 'Space Mono', monospace;
-  font-size: 2.4rem;
-  font-weight: 700;
-  background: linear-gradient(135deg, var(--accent), var(--accent2));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  line-height: 1;
-}
-.stat-l {
-  font-size: 0.75rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  margin-top: 0.4rem;
-}
+/* ── SECTION HEADER ── */
+.s-eyebrow{font-family:var(--mono);font-size:.7rem;color:var(--accent);letter-spacing:.18em;text-transform:uppercase;margin-bottom:.9rem}
+.s-title{font-family:var(--serif);font-size:clamp(1.8rem,3.8vw,2.9rem);font-weight:400;letter-spacing:-.02em;line-height:1.15;margin-bottom:3rem}
 
 /* ── FEATURES ── */
-#features {
-  padding: 7rem 4rem;
-  max-width: 1280px;
-  margin: 0 auto;
-}
+#features{padding:7rem 5rem;max-width:1300px;margin:0 auto}
+.feat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);border:1px solid var(--border);border-radius:18px;overflow:hidden}
+.feat{background:var(--panel);padding:2.2rem;opacity:0;transform:translateY(24px);transition:opacity .5s,transform .5s,background .25s}
+.feat.vis{opacity:1;transform:translateY(0)}
+.feat:hover{background:#0f1528}
+.feat-ico{font-size:1.8rem;display:block;margin-bottom:1rem}
+.feat-name{font-size:1rem;font-weight:600;margin-bottom:.5rem}
+.feat-desc{font-size:.84rem;color:var(--muted);line-height:1.68}
 
-.s-label {
-  font-family: 'Space Mono', monospace;
-  font-size: 0.72rem;
-  color: var(--accent);
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  margin-bottom: 1rem;
-}
-
-.s-title {
-  font-size: clamp(1.9rem, 3.8vw, 3rem);
-  font-weight: 800;
-  letter-spacing: -0.03em;
-  margin-bottom: 3.5rem;
-  max-width: 580px;
-}
-
-.feat-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1.5px;
-  background: var(--border);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  overflow: hidden;
-}
-
-.feat {
-  background: var(--panel);
-  padding: 2.2rem;
-  position: relative;
-  overflow: hidden;
-  opacity: 0;
-  transform: translateY(28px);
-  transition: opacity 0.5s, transform 0.5s, background 0.3s;
-}
-.feat.vis { opacity: 1; transform: translateY(0); }
-
-.feat::after {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, var(--accent2), var(--accent));
-  opacity: 0;
-  transition: opacity 0.3s;
-}
-.feat:hover { background: #111928; }
-.feat:hover::after { opacity: 1; }
-
-.feat-ico  { font-size: 1.9rem; margin-bottom: 1.1rem; display: block; }
-.feat-name { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.55rem; }
-.feat-desc { font-size: 0.86rem; color: var(--muted); line-height: 1.65; }
+/* ── ARB HIGHLIGHT ── */
+#arbitrage{padding:6rem 5rem;background:var(--bg2);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.arb-inner{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:5rem;align-items:center}
+.arb-card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:2rem;font-family:var(--mono);font-size:.82rem}
+.arb-card-header{display:flex;align-items:center;gap:.7rem;margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid var(--border)}
+.arb-badge{font-size:.65rem;background:rgba(79,255,176,.12);border:1px solid rgba(79,255,176,.25);color:var(--accent);border-radius:100px;padding:.2rem .65rem;letter-spacing:.08em;text-transform:uppercase}
+.arb-row{display:flex;justify-content:space-between;align-items:center;padding:.55rem 0;border-bottom:1px solid var(--border)}
+.arb-row:last-child{border-bottom:none}
+.arb-label{color:var(--muted)}
+.arb-val{color:var(--text);font-weight:500}
+.arb-profit{color:var(--accent)}
+.arb-type{display:inline-flex;align-items:center;gap:.4rem;font-size:.7rem;background:rgba(61,139,255,.1);border:1px solid rgba(61,139,255,.2);color:var(--blue);border-radius:4px;padding:.15rem .5rem}
 
 /* ── HOW ── */
-#how {
-  padding: 7rem 4rem;
-  background: var(--bg2);
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-}
-
-.how-inner { max-width: 1100px; margin: 0 auto; }
-
-.steps {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 2rem;
-  margin-top: 3.5rem;
-  position: relative;
-}
-
-.steps::before {
-  content: '';
-  position: absolute;
-  top: 27px; left: 6rem; right: 6rem;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-}
-
-.step {
-  text-align: center;
-  position: relative;
-  opacity: 0;
-  transform: translateY(18px);
-  transition: opacity 0.5s, transform 0.5s;
-}
-.step.vis { opacity: 1; transform: translateY(0); }
-
-.step-n {
-  width: 54px; height: 54px;
-  border-radius: 50%;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: 'Space Mono', monospace;
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--accent);
-  margin: 0 auto 1.4rem;
-  transition: all 0.3s;
-}
-.step:hover .step-n {
-  background: var(--accent);
-  color: var(--bg);
-  border-color: var(--accent);
-  box-shadow: 0 0 22px rgba(0,229,255,0.4);
-}
-
-.step h3 { font-size: 0.98rem; font-weight: 700; margin-bottom: 0.55rem; }
-.step p  { font-size: 0.84rem; color: var(--muted); line-height: 1.65; }
+#how{padding:7rem 5rem}
+.how-inner{max-width:1100px;margin:0 auto}
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:2rem;margin-top:3rem;position:relative}
+.steps::before{content:'';position:absolute;top:25px;left:7rem;right:7rem;height:1px;background:linear-gradient(90deg,transparent,var(--border) 20%,var(--accent) 50%,var(--border) 80%,transparent)}
+.step{text-align:center;opacity:0;transform:translateY(18px);transition:opacity .5s,transform .5s}
+.step.vis{opacity:1;transform:translateY(0)}
+.step-n{width:50px;height:50px;border-radius:50%;background:var(--panel);border:1px solid var(--border);display:grid;place-items:center;font-family:var(--mono);font-size:.9rem;font-weight:500;color:var(--accent);margin:0 auto 1.3rem;transition:all .3s}
+.step:hover .step-n{background:var(--accent);color:var(--bg);border-color:var(--accent);box-shadow:0 0 24px rgba(79,255,176,.35)}
+.step h3{font-size:.95rem;font-weight:600;margin-bottom:.5rem}
+.step p{font-size:.83rem;color:var(--muted);line-height:1.65}
 
 /* ── EXCHANGES ── */
-#exchanges {
-  padding: 6rem 4rem;
-  max-width: 1100px;
-  margin: 0 auto;
-  text-align: center;
-}
+#exchanges{padding:5rem 5rem;text-align:center}
+.exch-inner{max-width:1000px;margin:0 auto}
+.exch-grid{display:flex;flex-wrap:wrap;justify-content:center;gap:1rem;margin-top:2.8rem}
+.exch{display:flex;align-items:center;gap:.55rem;background:var(--panel);border:1px solid var(--border);border-radius:100px;padding:.6rem 1.5rem;font-size:.92rem;font-weight:500;transition:all .25s;cursor:default}
+.exch:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-3px);box-shadow:0 6px 24px rgba(79,255,176,.12)}
+.exch-new{border-color:rgba(79,255,176,.3);background:rgba(79,255,176,.04)}
 
-.exch-row {
-  display: flex;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 1.2rem;
-  margin-top: 3rem;
-}
-
-.exch {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 100px;
-  padding: 0.65rem 1.6rem;
-  font-weight: 600;
-  font-size: 0.95rem;
-  transition: all 0.25s;
-  cursor: default;
-}
-.exch:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  transform: translateY(-3px);
-  box-shadow: 0 6px 20px rgba(0,229,255,0.14);
-}
+/* ── NOTIFICATIONS ── */
+#notifications{padding:6rem 5rem;background:var(--bg2);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.notif-inner{max-width:1100px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:4rem;align-items:center}
+.notif-feed{display:flex;flex-direction:column;gap:.75rem}
+.notif{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:1rem 1.2rem;display:flex;gap:.9rem;align-items:flex-start;opacity:0;transform:translateX(-18px);transition:opacity .5s,transform .5s}
+.notif.vis{opacity:1;transform:translateX(0)}
+.notif-icon{font-size:1.3rem;flex-shrink:0;margin-top:.1rem}
+.notif-body{}
+.notif-title{font-size:.88rem;font-weight:600;margin-bottom:.2rem}
+.notif-text{font-size:.79rem;color:var(--muted);line-height:1.55}
+.notif-time{font-family:var(--mono);font-size:.68rem;color:var(--muted);margin-top:.3rem}
+.notif-tag{display:inline-block;font-family:var(--mono);font-size:.65rem;padding:.12rem .45rem;border-radius:4px;margin-left:.4rem;vertical-align:middle}
+.tag-buy{background:rgba(79,255,176,.12);color:var(--accent);border:1px solid rgba(79,255,176,.2)}
+.tag-arb{background:rgba(61,139,255,.12);color:var(--blue);border:1px solid rgba(61,139,255,.2)}
+.tag-alert{background:rgba(255,209,102,.12);color:var(--gold);border:1px solid rgba(255,209,102,.2)}
 
 /* ── PRICING ── */
-#pricing {
-  padding: 7rem 4rem;
-  background: var(--bg2);
-  border-top: 1px solid var(--border);
-}
-
-.price-inner { max-width: 1000px; margin: 0 auto; text-align: center; }
-
-.plans {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1.5rem;
-  margin-top: 3.5rem;
-}
-
-.plan {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 2.5rem 2rem;
-  position: relative;
-  opacity: 0;
-  transform: translateY(28px);
-  transition: opacity 0.5s, transform 0.5s, border-color 0.3s, box-shadow 0.3s;
-}
-.plan.vis { opacity: 1; transform: translateY(0); }
-.plan:hover {
-  transform: translateY(-6px) !important;
-  border-color: var(--accent2);
-  box-shadow: 0 20px 60px rgba(123,92,255,0.18);
-}
-
-.plan-hot {
-  border-color: var(--accent);
-  background: linear-gradient(160deg, rgba(0,229,255,0.04), rgba(123,92,255,0.04));
-}
-.plan-hot:hover {
-  box-shadow: 0 20px 60px rgba(0,229,255,0.22) !important;
-}
-
-.plan-badge {
-  position: absolute;
-  top: -13px; left: 50%;
-  transform: translateX(-50%);
-  background: linear-gradient(135deg, var(--accent2), var(--accent));
-  color: #fff;
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 0.22rem 0.9rem;
-  border-radius: 100px;
-  white-space: nowrap;
-}
-
-.plan-name {
-  font-size: 0.8rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  margin-bottom: 1rem;
-}
-
-.plan-price {
-  font-family: 'Space Mono', monospace;
-  font-size: 2.9rem;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  line-height: 1;
-}
-.plan-price sup { font-size: 1.1rem; vertical-align: super; }
-
-.plan-per {
-  font-size: 0.82rem;
-  color: var(--muted);
-  margin: 0.5rem 0 1.8rem;
-}
-
-.plan-save { color: var(--accent3); font-weight: 700; margin-left: 0.4rem; }
-
-.plan-feats {
-  list-style: none;
-  margin-bottom: 2rem;
-  text-align: left;
-}
-.plan-feats li {
-  font-size: 0.86rem;
-  color: var(--muted);
-  padding: 0.42rem 0;
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  border-bottom: 1px solid rgba(26,37,64,0.55);
-}
-.plan-feats li::before {
-  content: '✓';
-  color: var(--accent3);
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
-/* Payment pills */
-.pay-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.8rem;
-  justify-content: center;
-  margin-top: 2.8rem;
-}
-.pay-pill {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.42rem 0.9rem;
-  font-size: 0.8rem;
-  color: var(--muted);
-  font-family: 'Space Mono', monospace;
-}
+#pricing{padding:7rem 5rem}
+.price-inner{max-width:980px;margin:0 auto;text-align:center}
+.plans{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin-top:3.5rem}
+.plan{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:2.4rem 1.8rem;position:relative;opacity:0;transform:translateY(24px);transition:opacity .5s,transform .5s,border-color .3s,box-shadow .3s;text-align:left}
+.plan.vis{opacity:1;transform:translateY(0)}
+.plan:hover{transform:translateY(-5px)!important;border-color:rgba(79,255,176,.3);box-shadow:0 16px 56px rgba(79,255,176,.1)}
+.plan-featured{border-color:var(--accent);background:linear-gradient(160deg,rgba(79,255,176,.04),rgba(61,139,255,.03))}
+.plan-badge{position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--accent);color:var(--bg);font-family:var(--mono);font-size:.65rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:.2rem .8rem;border-radius:100px;white-space:nowrap}
+.plan-name{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;font-family:var(--mono);margin-bottom:.9rem}
+.plan-price{font-family:var(--mono);font-size:2.6rem;font-weight:500;line-height:1;color:var(--text)}
+.plan-price sup{font-size:1rem;vertical-align:super}
+.plan-per{font-size:.8rem;color:var(--muted);margin:.45rem 0 1.8rem}
+.plan-save{color:var(--accent);font-weight:600;margin-left:.3rem}
+.plan-feats{list-style:none;margin-bottom:2rem}
+.plan-feats li{font-size:.84rem;color:var(--muted);padding:.38rem 0;display:flex;align-items:center;gap:.5rem;border-bottom:1px solid rgba(20,28,50,.8)}
+.plan-feats li::before{content:'✓';color:var(--accent);font-weight:700;flex-shrink:0}
+.pay-grid{display:flex;flex-wrap:wrap;gap:.7rem;justify-content:center;margin-top:2.5rem}
+.pay-pill{display:flex;align-items:center;gap:.4rem;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:.38rem .85rem;font-size:.78rem;color:var(--muted);font-family:var(--mono)}
 
 /* ── CTA ── */
-#cta {
-  padding: 9rem 4rem;
-  text-align: center;
-  position: relative;
-  overflow: hidden;
-}
-
-#cta::before {
-  content: '';
-  position: absolute;
-  top: 50%; left: 50%;
-  transform: translate(-50%, -50%);
-  width: 700px; height: 700px;
-  background: radial-gradient(ellipse, rgba(123,92,255,0.14) 0%, transparent 70%);
-  pointer-events: none;
-}
-
-#cta h2 {
-  font-size: clamp(2.5rem, 5.5vw, 4.2rem);
-  font-weight: 800;
-  letter-spacing: -0.04em;
-  margin-bottom: 1.2rem;
-  position: relative;
-}
-
-#cta p {
-  color: var(--muted);
-  font-size: 1rem;
-  margin-bottom: 2.5rem;
-  position: relative;
-}
-
-.tg-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.8rem;
-  background: #229ED9;
-  color: #fff;
-  padding: 1rem 2.6rem;
-  border-radius: 10px;
-  font-size: 1.05rem;
-  font-weight: 700;
-  text-decoration: none;
-  transition: all 0.25s;
-  position: relative;
-  box-shadow: 0 4px 30px rgba(34,158,217,0.35);
-  font-family: 'Syne', sans-serif;
-}
-.tg-btn:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 10px 50px rgba(34,158,217,0.5);
-}
+#cta{padding:9rem 5rem;text-align:center;position:relative;overflow:hidden}
+#cta::before{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:800px;height:800px;background:radial-gradient(ellipse,rgba(155,111,255,.12) 0%,transparent 68%);pointer-events:none}
+#cta h2{font-family:var(--serif);font-size:clamp(2.8rem,6vw,5rem);font-weight:400;letter-spacing:-.03em;margin-bottom:1.2rem;position:relative}
+#cta h2 em{color:var(--accent);font-style:italic}
+#cta p{color:var(--muted);font-size:1rem;margin-bottom:2.8rem;position:relative}
+.tg-btn{display:inline-flex;align-items:center;gap:.8rem;background:#229ED9;color:#fff;padding:1rem 2.8rem;border-radius:10px;font-size:1rem;font-weight:600;text-decoration:none;transition:all .25s;box-shadow:0 4px 36px rgba(34,158,217,.32);position:relative;font-family:var(--sans)}
+.tg-btn:hover{transform:translateY(-3px);box-shadow:0 10px 56px rgba(34,158,217,.48)}
 
 /* ── FOOTER ── */
-footer {
-  padding: 2.2rem 4rem;
-  border-top: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 1rem;
-  font-size: 0.8rem;
-  color: var(--muted);
-  background: var(--bg);
-  position: relative;
-  z-index: 2;
-}
-footer a { color: var(--muted); text-decoration: none; transition: color 0.2s; }
-footer a:hover { color: var(--accent); }
-.footer-links { display: flex; gap: 2rem; }
+footer{padding:2rem 5rem;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;font-size:.78rem;color:var(--muted);background:var(--bg);position:relative;z-index:2}
+footer a{color:var(--muted);text-decoration:none;transition:color .2s}
+footer a:hover{color:var(--accent)}
+.footer-links{display:flex;gap:2rem}
 
 /* ── ANIMATIONS ── */
-@keyframes fadeDown {
-  from { opacity: 0; transform: translateY(-14px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-@keyframes fadeUp {
-  from { opacity: 0; transform: translateY(22px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-@keyframes pulse {
-  0%,100% { opacity:1; box-shadow:0 0 0 0 rgba(0,255,157,0.45); }
-  50%      { opacity:0.7; box-shadow:0 0 0 6px rgba(0,255,157,0); }
-}
+@keyframes fadeDown{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+@keyframes blink{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(79,255,176,.45)}50%{opacity:.7;box-shadow:0 0 0 5px rgba(79,255,176,0)}}
 
 /* ── RESPONSIVE ── */
-@media(max-width:900px) {
-  nav { padding: 1rem 1.5rem; }
-  nav ul { display: none; }
-  #hero,#features,#how,#exchanges,#pricing,#cta { padding-left:1.5rem; padding-right:1.5rem; }
-  .feat-grid { grid-template-columns: 1fr; }
-  .steps { grid-template-columns: 1fr 1fr; }
-  .steps::before { display: none; }
-  .plans { grid-template-columns: 1fr; }
-  footer { padding: 1.8rem 1.5rem; justify-content: center; text-align: center; }
+@media(max-width:960px){
+  nav{padding:1rem 1.5rem}
+  nav ul{display:none}
+  #hero,#features,#arbitrage,#how,#exchanges,#notifications,#pricing,#cta{padding-left:1.5rem;padding-right:1.5rem}
+  .feat-grid{grid-template-columns:1fr}
+  .arb-inner,.notif-inner{grid-template-columns:1fr;gap:2.5rem}
+  .steps{grid-template-columns:1fr 1fr}
+  .steps::before{display:none}
+  .plans{grid-template-columns:1fr}
+  footer{padding:1.8rem 1.5rem;justify-content:center;text-align:center}
 }
 </style>
 </head>
 <body>
 
-<!-- NAV -->
 <nav>
   <a class="logo" href="#">
-    <div class="logo-icon">🤖</div>
-    <em>DUYS</em>&nbsp;Trading
+    <div class="logo-mark">⚡</div>
+    <span class="logo-name"><span>DUYS</span> Trading</span>
   </a>
   <ul>
     <li><a href="#features">Features</a></li>
-    <li><a href="#how">How It Works</a></li>
+    <li><a href="#arbitrage">Arbitrage</a></li>
     <li><a href="#exchanges">Exchanges</a></li>
     <li><a href="#pricing">Pricing</a></li>
-    <li><a href="#cta" class="nav-cta">Free Trial</a></li>
+    <li><a href="#cta" class="nav-cta">Start Free</a></li>
   </ul>
 </nav>
 
-<!-- HERO -->
 <section id="hero">
-  <div class="hero-glow"></div>
+  <div class="hero-orbs">
+    <div class="orb orb1"></div>
+    <div class="orb orb2"></div>
+    <div class="orb orb3"></div>
+  </div>
   <div>
-    <div class="hero-badge"><span class="badge-dot"></span>Live on Telegram &nbsp;·&nbsp; Trade 24/7</div>
-    <h1>Your Crypto Bot<br><span class="grad-text">Never Sleeps.</span></h1>
-    <p class="hero-sub">DUYS Trading Bot connects to your exchange, reads multi-layer signals in real time, and executes trades automatically — all inside Telegram.</p>
+    <div class="hero-pill"><span class="pill-dot"></span>Live on Telegram &nbsp;·&nbsp; 8 Exchanges &nbsp;·&nbsp; 24/7</div>
+    <h1>Trade smarter.<br><em>Never sleep.</em></h1>
+    <p class="hero-sub">DUYS connects to your exchange, reads multi-layer signals every 60 seconds, and executes trades automatically — all inside Telegram. Arbitrage alerts pop up the moment an opportunity appears.</p>
     <div class="hero-btns">
-      <a href="#cta" class="btn btn-grad"><span>🚀</span> Start Free — 7 Days</a>
-      <a href="#features" class="btn btn-ghost"><span>→</span> See Features</a>
+      <a href="#cta" class="btn btn-primary">🚀 Start Free — 7 Days</a>
+      <a href="#features" class="btn btn-outline">Explore Features →</a>
     </div>
-    <div class="ticker-wrap" id="ticker"></div>
+    <div class="ticker" id="ticker"></div>
   </div>
 </section>
 
-<!-- STATS -->
-<div class="stats">
-  <div class="stat" data-n="5">
-    <div class="stat-n" id="sn0">0</div>
-    <div class="stat-l">Exchanges</div>
-  </div>
-  <div class="stat" data-n="12">
-    <div class="stat-n" id="sn1">0</div>
-    <div class="stat-l">Signal Layers</div>
-  </div>
-  <div class="stat" data-n="7">
-    <div class="stat-n" id="sn2">0</div>
-    <div class="stat-l">Day Free Trial</div>
-  </div>
-  <div class="stat" data-n="60">
-    <div class="stat-n" id="sn3">0</div>
-    <div class="stat-l">Second Scan Cycle</div>
-  </div>
-  <div class="stat">
-    <div class="stat-n">24/7</div>
-    <div class="stat-l">Always Running</div>
-  </div>
+<div class="stats-bar">
+  <div class="stat" data-n="8"><div class="stat-n" id="sn0">0</div><div class="stat-l">Exchanges</div></div>
+  <div class="stat" data-n="7"><div class="stat-n" id="sn1">0</div><div class="stat-l">Signal Layers</div></div>
+  <div class="stat" data-n="24"><div class="stat-n" id="sn2">0</div><div class="stat-l">Arb Tokens</div></div>
+  <div class="stat" data-n="60"><div class="stat-n" id="sn3">0</div><div class="stat-l">Second Scan Cycle</div></div>
+  <div class="stat"><div class="stat-n">24/7</div><div class="stat-l">Always On</div></div>
 </div>
 
-<!-- FEATURES -->
 <section id="features">
-  <div class="s-label">// What it does</div>
-  <h2 class="s-title">Everything a serious trader needs.</h2>
+  <div class="s-eyebrow">// What it does</div>
+  <h2 class="s-title">Everything a serious trader needs,<br>delivered in Telegram.</h2>
   <div class="feat-grid">
-    <div class="feat"><span class="feat-ico">🤖</span><div class="feat-name">Auto & Manual Trading</div><p class="feat-desc">Bot scans every 60 seconds and trades automatically, or switch to manual mode and tap Start Now to enter on your terms. TP/SL always closes positions automatically.</p></div>
-    <div class="feat"><span class="feat-ico">📊</span><div class="feat-name">7-Layer Signal Engine</div><p class="feat-desc">RSI, EMA crossover, MACD, Bollinger Bands, volume spike, news sentiment, and CoinMarketCap data are combined into a single confidence score before any order fires.</p></div>
-    <div class="feat"><span class="feat-ico">🎯</span><div class="feat-name">Flexible TP / SL</div><p class="feat-desc">Set Take Profit and Stop Loss as a percentage or a fixed price. Enable trailing stop to lock in profits as price rises. All configurable per user, per trade.</p></div>
-    <div class="feat"><span class="feat-ico">🪙</span><div class="feat-name">Multi-Symbol Trading</div><p class="feat-desc">Trade up to 3 symbols simultaneously on the same exchange. Each position tracks its own TP/SL and signals independently, with no cross-contamination.</p></div>
-    <div class="feat"><span class="feat-ico">💡</span><div class="feat-name">Signal Suggestions</div><p class="feat-desc">Every 5 minutes the bot scans 12 top liquid pairs on your exchange and sends a suggestion when it finds a ≥70% confidence BUY signal on a coin you're not trading yet.</p></div>
-    <div class="feat"><span class="feat-ico">🔒</span><div class="feat-name">AES-256 Key Encryption</div><p class="feat-desc">API keys are encrypted at rest with Fernet AES-256 before being saved. Messages containing keys are deleted from Telegram chat immediately after entry.</p></div>
-    <div class="feat"><span class="feat-ico">📈</span><div class="feat-name">Daily PnL Reports</div><p class="feat-desc">Automatic daily summaries — trades taken, win/loss count, best and worst trade, weekly running total — delivered to your Telegram at a time you choose.</p></div>
-    <div class="feat"><span class="feat-ico">🔔</span><div class="feat-name">Custom Price Alerts</div><p class="feat-desc">Set price alerts on any coin with above/below conditions. Add a personal note. Get notified the moment your target is hit, then the alert clears automatically.</p></div>
-    <div class="feat"><span class="feat-ico">🚨</span><div class="feat-name">Panic Close</div><p class="feat-desc">One confirmation tap closes all your open positions at market price. Admins can close all trades across all users simultaneously with the /close command.</p></div>
+    <div class="feat"><span class="feat-ico">🤖</span><div class="feat-name">Auto & Manual Trading</div><p class="feat-desc">Bot scans signals every 60 seconds and places orders automatically, or switch to manual mode and confirm each entry yourself. TP/SL always manages the exit.</p></div>
+    <div class="feat"><span class="feat-ico">📊</span><div class="feat-name">7-Layer Signal Engine</div><p class="feat-desc">RSI, EMA crossover, MACD, Bollinger Bands, volume spike, news sentiment, and CoinMarketCap data are weighted into a single confidence score before any order fires.</p></div>
+    <div class="feat"><span class="feat-ico">⚡</span><div class="feat-name">Arbitrage Scanner</div><p class="feat-desc">Scans cross-exchange spreads and triangular paths every 3 minutes. New opportunities trigger instant alerts. Pick your own tokens. Enable or disable anytime.</p></div>
+    <div class="feat"><span class="feat-ico">🎯</span><div class="feat-name">Flexible TP / SL</div><p class="feat-desc">Set Take Profit and Stop Loss as a percentage or a fixed price. Enable trailing stop to lock in profits as price climbs. All configurable per user, per trade.</p></div>
+    <div class="feat"><span class="feat-ico">🪙</span><div class="feat-name">Multi-Symbol Trading</div><p class="feat-desc">Trade up to 3 symbols simultaneously. Each position tracks its own TP/SL and signals independently — no cross-contamination of orders or logic.</p></div>
+    <div class="feat"><span class="feat-ico">💡</span><div class="feat-name">Auto Signal Alerts</div><p class="feat-desc">Every 5 minutes the bot scans 12 top liquid pairs and sends a Telegram notification the moment it finds a ≥70% confidence BUY signal on a coin you're not yet trading.</p></div>
+    <div class="feat"><span class="feat-ico">🔒</span><div class="feat-name">AES-256 Key Encryption</div><p class="feat-desc">API keys are encrypted at rest with Fernet AES-256 before being saved. The message containing your key is deleted from chat immediately after entry.</p></div>
+    <div class="feat"><span class="feat-ico">📈</span><div class="feat-name">Daily PnL Reports</div><p class="feat-desc">Automatic daily summaries — trades taken, win/loss count, best and worst trade, weekly running total — delivered at a time you set.</p></div>
+    <div class="feat"><span class="feat-ico">🔔</span><div class="feat-name">Custom Price Alerts</div><p class="feat-desc">Set above/below alerts on any coin with an optional note. Get notified the moment the target is hit. Alert clears automatically — no manual cleanup.</p></div>
   </div>
 </section>
 
-<!-- CHARTS -->
-<section id="charts">
-  <div class="s-label">// Live Charts</div>
-  <h2 class="s-title">Track your trades in real-time.</h2>
-  <div style="max-width: 1200px; margin: 0 auto; padding: 2rem;">
-    <canvas id="priceChart" width="400" height="200"></canvas>
+<section id="arbitrage">
+  <div class="arb-inner">
+    <div>
+      <div class="s-eyebrow">// Arbitrage Engine</div>
+      <h2 class="s-title">Spot the edge.<br>Get notified first.</h2>
+      <p style="color:var(--muted);font-size:.93rem;line-height:1.75;margin-bottom:1.8rem">
+        DUYS scans two types of arbitrage every 3 minutes across all your connected exchanges. Each new opportunity fires an immediate Telegram alert — the same opportunity won't spam, but a different pair always notifies right away.
+      </p>
+      <div style="display:flex;flex-direction:column;gap:.9rem;font-size:.87rem">
+        <div style="display:flex;gap:.8rem;align-items:flex-start">
+          <span style="color:var(--accent);font-size:1.1rem;flex-shrink:0">📊</span>
+          <div><strong>Cross-Exchange</strong> — buy on the exchange with the lower ask, sell on the one with the higher bid. Net spread must exceed both taker fees plus a transfer cost buffer.</div>
+        </div>
+        <div style="display:flex;gap:.8rem;align-items:flex-start">
+          <span style="color:var(--blue);font-size:1.1rem;flex-shrink:0">🔺</span>
+          <div><strong>Triangular</strong> — exploit mispricing across three pairs on a single exchange. All three legs are simulated with compounding fee deductions before any alert is sent.</div>
+        </div>
+        <div style="display:flex;gap:.8rem;align-items:flex-start">
+          <span style="color:var(--gold);font-size:1.1rem;flex-shrink:0">🪙</span>
+          <div><strong>Token Picker</strong> — choose exactly which tokens to scan. Fewer tokens = faster scans. Change your selection anytime from the /arbitrage control panel.</div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="arb-card">
+        <div class="arb-card-header">
+          <span style="color:var(--accent);font-size:.9rem">⚡</span>
+          <span style="font-weight:500;color:var(--text)">Live Opportunity</span>
+          <span class="arb-badge">New</span>
+        </div>
+        <div class="arb-row"><span class="arb-label">Type</span><span class="arb-val"><span class="arb-type">📊 Cross-Exchange</span></span></div>
+        <div class="arb-row"><span class="arb-label">Symbol</span><span class="arb-val">ETH/USDT</span></div>
+        <div class="arb-row"><span class="arb-label">Buy on</span><span class="arb-val">Binance @ $3 284.10</span></div>
+        <div class="arb-row"><span class="arb-label">Sell on</span><span class="arb-val">BingX @ $3 301.80</span></div>
+        <div class="arb-row"><span class="arb-label">Gross Spread</span><span class="arb-val">0.539%</span></div>
+        <div class="arb-row"><span class="arb-label">Exchange Fees</span><span class="arb-val">0.200%</span></div>
+        <div class="arb-row"><span class="arb-label">Net Profit</span><span class="arb-profit">+0.339% (~$3.39 / $1k)</span></div>
+      </div>
+      <div class="arb-card" style="margin-top:.9rem">
+        <div class="arb-card-header">
+          <span style="color:var(--blue);font-size:.9rem">🔺</span>
+          <span style="font-weight:500;color:var(--text)">Triangular</span>
+          <span class="arb-badge" style="background:rgba(61,139,255,.12);border-color:rgba(61,139,255,.25);color:var(--blue)">New</span>
+        </div>
+        <div class="arb-row"><span class="arb-label">Exchange</span><span class="arb-val">Bybit</span></div>
+        <div class="arb-row"><span class="arb-label">Path</span><span class="arb-val" style="font-size:.77rem">BUY BTC/USDT → SELL ETH/BTC → SELL ETH/USDT</span></div>
+        <div class="arb-row"><span class="arb-label">Start</span><span class="arb-val">$1 000.00</span></div>
+        <div class="arb-row"><span class="arb-label">End (after fees)</span><span class="arb-val">$1 004.21</span></div>
+        <div class="arb-row"><span class="arb-label">Net Profit</span><span class="arb-profit">+0.421% (~$4.21 / $1k)</span></div>
+      </div>
+    </div>
   </div>
 </section>
 
-<!-- HOW -->
 <section id="how">
   <div class="how-inner">
-    <div class="s-label">// Getting started</div>
+    <div class="s-eyebrow">// Getting started</div>
     <h2 class="s-title">Up and trading in four steps.</h2>
     <div class="steps">
       <div class="step">
         <div class="step-n">01</div>
         <h3>Open the Bot</h3>
-        <p>Find @DUYSTradingBot on Telegram and send /start. Claim your 7-day free trial or subscribe in seconds.</p>
+        <p>Find @DUYSTradingBot on Telegram and send /start. Claim your 7-day free trial — no card required.</p>
       </div>
       <div class="step">
         <div class="step-n">02</div>
         <h3>Connect Exchange</h3>
-        <p>Enter your read + spot-trade API keys. They're encrypted immediately — never visible in chat history.</p>
+        <p>Enter your API keys for any of 8 supported exchanges. Keys are AES-256 encrypted and deleted from chat immediately.</p>
       </div>
       <div class="step">
         <div class="step-n">03</div>
         <h3>Set Parameters</h3>
-        <p>Choose your symbol, trade amount, TP/SL, and trade mode. The guided onboarding walks you through each step.</p>
+        <p>Choose your symbol, trade amount, TP/SL, and mode. The guided onboarding walks you through every setting.</p>
       </div>
       <div class="step">
         <div class="step-n">04</div>
-        <h3>Start Trading</h3>
-        <p>Tap Start Trade. The bot handles everything — notifications for every buy, close, alert, and daily summary.</p>
+        <h3>Trade & Arbitrage</h3>
+        <p>Tap Start Trade. The bot handles everything — plus sends instant arbitrage alerts whenever a profitable window opens.</p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- EXCHANGES -->
 <section id="exchanges">
-  <div class="s-label">// Supported exchanges</div>
-  <h2 class="s-title" style="margin:0 auto 0.8rem;text-align:center;">Connect your exchange.</h2>
-  <p style="color:var(--muted);font-size:0.93rem;">Save keys for multiple exchanges. Switch instantly without re-entering credentials.</p>
-  <div class="exch-row">
-    <div class="exch">🟡 Binance</div>
-    <div class="exch">🔵 Bybit</div>
-    <div class="exch">⚫ OKX</div>
-    <div class="exch">🟢 MEXC</div>
-    <div class="exch">🟠 KuCoin</div>
+  <div class="exch-inner">
+    <div class="s-eyebrow">// Supported exchanges</div>
+    <h2 class="s-title" style="text-align:center;margin-bottom:.7rem">Connect your exchange.</h2>
+    <p style="color:var(--muted);font-size:.9rem;margin-bottom:0">Save keys for multiple exchanges. Switch instantly without re-entering credentials.</p>
+    <div class="exch-grid">
+      <div class="exch">🟡 Binance</div>
+      <div class="exch">🔵 Bybit</div>
+      <div class="exch">⚫ OKX</div>
+      <div class="exch">🟢 MEXC</div>
+      <div class="exch">🟠 KuCoin</div>
+      <div class="exch exch-new">🔵 Coinbase ✦ New</div>
+      <div class="exch exch-new">🟣 BingX ✦ New</div>
+      <div class="exch exch-new">🔴 Gate.io ✦ New</div>
+    </div>
   </div>
 </section>
 
-<!-- PRICING -->
+<section id="notifications">
+  <div class="notif-inner">
+    <div>
+      <div class="s-eyebrow">// Notifications</div>
+      <h2 class="s-title">Important alerts always surface.<br>Noise never does.</h2>
+      <p style="color:var(--muted);font-size:.9rem;line-height:1.75">
+        DUYS sends three types of proactive notifications — all delivered directly in Telegram, no app switching required. Duplicate alerts are suppressed per-opportunity so you never get spammed.
+      </p>
+    </div>
+    <div class="notif-feed">
+      <div class="notif">
+        <div class="notif-icon">📈</div>
+        <div class="notif-body">
+          <div class="notif-title">Signal Alert — BUY SOL/USDT <span class="notif-tag tag-buy">BUY</span></div>
+          <div class="notif-text">Confidence: 84% 🟩🟩🟩🟩⬜<br>Reason: RSI oversold + EMA golden cross + volume spike detected</div>
+          <div class="notif-time">just now</div>
+        </div>
+      </div>
+      <div class="notif">
+        <div class="notif-icon">⚡</div>
+        <div class="notif-body">
+          <div class="notif-title">2 New Arbitrage Opportunities <span class="notif-tag tag-arb">ARB</span></div>
+          <div class="notif-text">📊 BTC/USDT Binance→BingX net +0.41%<br>🔺 Bybit USDT→BTC→ETH→USDT net +0.38%</div>
+          <div class="notif-time">2 min ago</div>
+        </div>
+      </div>
+      <div class="notif">
+        <div class="notif-icon">🔔</div>
+        <div class="notif-body">
+          <div class="notif-title">Price Alert Triggered — ETH/USDT <span class="notif-tag tag-alert">ALERT</span></div>
+          <div class="notif-text">📈 ETH crossed above your target of $3 250.00<br>Current price: $3 267.40 (+0.53%)</div>
+          <div class="notif-time">14 min ago</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section id="pricing">
   <div class="price-inner">
-    <div class="s-label">// Pricing</div>
-    <h2 class="s-title" style="margin:0 auto 0.6rem;text-align:center;">Simple, honest pricing.</h2>
-    <p style="color:var(--muted);font-size:0.93rem;">Start with a 7-day free trial. No card required. Cancel anytime.</p>
+    <div class="s-eyebrow">// Pricing</div>
+    <h2 class="s-title" style="text-align:center;margin-bottom:.6rem">Simple, honest pricing.</h2>
+    <p style="color:var(--muted);font-size:.9rem">Start with a 7-day free trial. No card required. Cancel anytime.</p>
     <div class="plans">
       <div class="plan">
         <div class="plan-name">Monthly</div>
         <div class="plan-price"><sup>$</sup>12</div>
         <div class="plan-per">per month</div>
         <ul class="plan-feats">
-          <li>All 5 exchanges</li>
+          <li>All 8 exchanges</li>
           <li>Auto & manual trading</li>
-          <li>Signal suggestions</li>
+          <li>Signal alerts</li>
+          <li>Arbitrage scanner</li>
           <li>Daily PnL reports</li>
           <li>Price alerts</li>
         </ul>
-        <a href="#cta" class="btn btn-ghost" style="width:100%;justify-content:center;">Get Started</a>
+        <a href="#cta" class="btn btn-outline" style="width:100%;justify-content:center">Get Started</a>
       </div>
-      <div class="plan plan-hot">
+      <div class="plan plan-featured">
         <div class="plan-badge">Most Popular</div>
         <div class="plan-name">Quarterly</div>
         <div class="plan-price"><sup>$</sup>34</div>
@@ -850,8 +431,9 @@ footer a:hover { color: var(--accent); }
           <li>Trade confirmation mode</li>
           <li>Trailing stop loss</li>
           <li>Export trade history CSV</li>
+          <li>Cross-exchange arbitrage</li>
         </ul>
-        <a href="#cta" class="btn btn-grad" style="width:100%;justify-content:center;">Get Started</a>
+        <a href="#cta" class="btn btn-primary" style="width:100%;justify-content:center">Get Started</a>
       </div>
       <div class="plan">
         <div class="plan-name">Semi-Annual</div>
@@ -859,15 +441,16 @@ footer a:hover { color: var(--accent); }
         <div class="plan-per">per 6 months <span class="plan-save">Save $7</span></div>
         <ul class="plan-feats">
           <li>Everything in Quarterly</li>
+          <li>Triangular arbitrage</li>
+          <li>Token picker for arb</li>
           <li>Referral reward system</li>
           <li>Priority support</li>
           <li>Early feature access</li>
-          <li>Dedicated onboarding</li>
         </ul>
-        <a href="#cta" class="btn btn-ghost" style="width:100%;justify-content:center;">Get Started</a>
+        <a href="#cta" class="btn btn-outline" style="width:100%;justify-content:center">Get Started</a>
       </div>
     </div>
-    <div class="pay-row">
+    <div class="pay-grid">
       <div class="pay-pill">💳 Card</div>
       <div class="pay-pill">📱 Mobile Money</div>
       <div class="pay-pill">🏦 Bank Transfer</div>
@@ -878,23 +461,23 @@ footer a:hover { color: var(--accent); }
   </div>
 </section>
 
-<!-- CTA -->
 <section id="cta">
-  <h2>Start your free trial<br><span class="grad-text">right now.</span></h2>
+  <h2>Start your free trial<br><em>right now.</em></h2>
   <p>No card needed. 7 days of full access. Your settings persist forever.</p>
   <a href="https://t.me/DUYSTradingBot" class="tg-btn">
-    ✈️ &nbsp;Open on Telegram
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.562 8.248l-2.04 9.61c-.15.666-.546.828-1.107.515l-3.072-2.263-1.483 1.427c-.163.163-.3.3-.617.3l.22-3.11 5.655-5.11c.246-.22-.053-.34-.38-.12L7.33 14.84l-3.02-.944c-.657-.206-.67-.657.137-.972l11.8-4.55c.548-.2 1.027.133.845.972l-.53-.098z"/></svg>
+    Open on Telegram
   </a>
 </section>
 
-<!-- FOOTER -->
 <footer>
-  <a class="logo" href="#" style="font-size:1rem;gap:0.55rem;">
-    <div class="logo-icon" style="width:28px;height:28px;font-size:0.85rem;">🤖</div>
-    <em>DUYS</em>&nbsp;Trading
+  <a class="logo" href="#" style="font-size:1rem;gap:.55rem">
+    <div class="logo-mark" style="width:28px;height:28px;font-size:.85rem">⚡</div>
+    <span class="logo-name" style="font-size:1.1rem"><span>DUYS</span> Trading</span>
   </a>
   <div class="footer-links">
     <a href="#features">Features</a>
+    <a href="#arbitrage">Arbitrage</a>
     <a href="#pricing">Pricing</a>
     <a href="#cta">Get Started</a>
   </div>
@@ -902,124 +485,61 @@ footer a:hover { color: var(--accent); }
 </footer>
 
 <script>
-// ── Live ticker ───────────────────────────────────────────────────────────────
+// ── Ticker ────────────────────────────────────────────────────────────────────
 const coins = [
-  { s:"BTC",  p:68420.5,  c:2.34  },
-  { s:"ETH",  p:3621.8,   c:1.87  },
-  { s:"SOL",  p:174.2,    c:4.12  },
-  { s:"BNB",  p:610.4,    c:-0.54 },
-  { s:"XRP",  p:0.6124,   c:3.21  },
+  {s:'BTC', p:68420.5,  c:2.34},
+  {s:'ETH', p:3621.8,   c:1.87},
+  {s:'SOL', p:174.2,    c:4.12},
+  {s:'BNB', p:610.4,    c:-0.54},
+  {s:'XRP', p:0.6124,   c:3.21},
+  {s:'ARB', p:1.284,    c:5.63},
 ];
-
-function fmtPrice(p) {
-  return p >= 1
-    ? p.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})
-    : p.toFixed(4);
-}
-
-function renderTicker() {
+const fmt = p => p>=1 ? p.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : p.toFixed(4);
+const renderTicker = () => {
   document.getElementById('ticker').innerHTML = coins.map(c =>
-    `<div class="tick">
-      <span class="tick-sym">${c.s}/USDT</span>
-      <span class="tick-px">$${fmtPrice(c.p)}</span>
-      <span class="${c.c>=0?'up':'dn'}">${c.c>=0?'+':''}${c.c.toFixed(2)}%</span>
-    </div>`
+    `<div class="tick"><span class="tick-sym">${c.s}/USDT</span><span class="tick-px">$${fmt(c.p)}</span><span class="${c.c>=0?'up':'dn'}">${c.c>=0?'+':''}${c.c.toFixed(2)}%</span></div>`
   ).join('');
-}
+};
 renderTicker();
-
 setInterval(() => {
-  coins.forEach(c => {
-    c.p = Math.max(0.01, c.p + (Math.random()-0.494)*c.p*0.0008);
-    c.c += (Math.random()-0.5)*0.04;
-  });
+  coins.forEach(c => {c.p=Math.max(0.01,c.p+(Math.random()-.494)*c.p*.0009);c.c+=(Math.random()-.5)*.05;});
   renderTicker();
-}, 2200);
+}, 2400);
 
-// ── Scroll animations ─────────────────────────────────────────────────────────
+// ── Intersection observer ─────────────────────────────────────────────────────
 const io = new IntersectionObserver(entries => {
-  entries.forEach((e, i) => {
-    if (e.isIntersecting) setTimeout(() => e.target.classList.add('vis'), i * 75);
-  });
-}, { threshold: 0.1 });
+  entries.forEach((e,i) => { if(e.isIntersecting) setTimeout(()=>e.target.classList.add('vis'),i*70); });
+},{threshold:0.1});
+document.querySelectorAll('.stat,.feat,.step,.plan,.notif').forEach(el=>io.observe(el));
 
-document.querySelectorAll('.stat,.feat,.step,.plan').forEach(el => io.observe(el));
-
-// ── Counter animation ─────────────────────────────────────────────────────────
-function counter(el, target, dur=1300) {
-  const t0 = performance.now();
-  const tick = now => {
-    const p = Math.min((now-t0)/dur, 1);
-    el.textContent = Math.round((1-(1-p)**3)*target);
-    if (p < 1) requestAnimationFrame(tick);
-    else el.textContent = target;
+// ── Counter ───────────────────────────────────────────────────────────────────
+function counter(el,target,dur=1400){
+  const t0=performance.now();
+  const tick=now=>{
+    const p=Math.min((now-t0)/dur,1);
+    el.textContent=Math.round((1-(1-p)**3)*target);
+    if(p<1)requestAnimationFrame(tick); else el.textContent=target;
   };
   requestAnimationFrame(tick);
 }
-
-const statsIO = new IntersectionObserver(entries => {
-  entries.forEach(e => {
-    if (!e.isIntersecting) return;
-    e.target.querySelectorAll('.stat[data-n]').forEach((s,i) => {
-      setTimeout(() => counter(s.querySelector('.stat-n'), +s.dataset.n), i*110);
+const statIO=new IntersectionObserver(entries=>{
+  entries.forEach(e=>{
+    if(!e.isIntersecting)return;
+    e.target.querySelectorAll('.stat[data-n]').forEach((s,i)=>{
+      setTimeout(()=>counter(s.querySelector('.stat-n'),+s.dataset.n),i*120);
     });
-    statsIO.unobserve(e.target);
+    statIO.unobserve(e.target);
   });
-}, { threshold: 0.3 });
-statsIO.observe(document.querySelector('.stats'));
+},{threshold:0.3});
+statIO.observe(document.querySelector('.stats-bar'));
 
-// ── Active nav highlight ──────────────────────────────────────────────────────
-const secs  = [...document.querySelectorAll('section[id]')];
-const links = [...document.querySelectorAll('nav a[href^="#"]')];
-window.addEventListener('scroll', () => {
-  const cur = secs.reduce((a,s) => window.scrollY >= s.offsetTop-130 ? s.id : a, '');
-  links.forEach(a => a.style.color = a.getAttribute('href')==='#'+cur ? 'var(--accent)' : '');
-}, {passive:true});
-
-// ── Chart integration ─────────────────────────────────────────────────────────
-async function loadChart(symbol = 'BTC') {
-  try {
-    const response = await fetch(`/api/chart_data/${symbol}`);
-    const data = await response.json();
-    const ctx = document.getElementById('priceChart').getContext('2d');
-    const ohlcData = data.timestamps.map((ts, i) => ({
-      x: ts,
-      o: data.open[i],
-      h: data.high[i],
-      l: data.low[i],
-      c: data.close[i]
-    }));
-    new Chart(ctx, {
-      type: 'candlestick',
-      data: {
-        datasets: [{
-          label: `${symbol}/USDT`,
-          data: ohlcData,
-          color: {
-            up: 'var(--accent3)',
-            down: 'var(--danger)',
-            unchanged: 'var(--muted)'
-          }
-        }]
-      },
-      options: {
-        responsive: true,
-        scales: {
-          x: {
-            type: 'time',
-            time: { unit: 'hour' }
-          }
-        }
-      }
-    });
-  } catch (error) {
-    console.error('Error loading chart:', error);
-  }
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  loadChart();
-});
+// ── Nav active ────────────────────────────────────────────────────────────────
+const secs=[...document.querySelectorAll('section[id]')];
+const links=[...document.querySelectorAll('nav a[href^="#"]')];
+window.addEventListener('scroll',()=>{
+  const cur=secs.reduce((a,s)=>window.scrollY>=s.offsetTop-140?s.id:a,'');
+  links.forEach(a=>a.style.color=a.getAttribute('href')==='#'+cur?'var(--accent)':'');
+},{passive:true});
 </script>
 </body>
 </html>
