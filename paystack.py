@@ -9,7 +9,7 @@ import hmac
 import json
 import logging
 import requests
-from config import PAYSTACK_SECRET_KEY, SUBSCRIPTION_PRICE_USD, BOT_WEBHOOK_URL
+from config import PAYSTACK_SECRET_KEY, PLAN_PRICES, BOT_WEBHOOK_URL
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +19,6 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-# Amount in kobo (NGN) or pesewas (GHS) or cents (USD).
-# Paystack supports NGN, GHS, USD, ZAR, KES, EGP, XOF, RWF.
-# We charge in USD (cents).
-AMOUNT_CENTS = int(SUBSCRIPTION_PRICE_USD * 100)
 
 
 def initialize_transaction(user_id: int, email: str, months: int = 1) -> dict:
@@ -33,7 +29,7 @@ def initialize_transaction(user_id: int, email: str, months: int = 1) -> dict:
     reference = f"ctb_{user_id}_{months}mo_{_now_ts()}"
     payload = {
         "email":        email,
-        "amount":       AMOUNT_CENTS * months,
+        "amount":       int(PLAN_PRICES.get(months, PLAN_PRICES[1]) * 100),
         "currency":     "USD",
         "reference":    reference,
         "callback_url": f"{BOT_WEBHOOK_URL}/paystack/callback",

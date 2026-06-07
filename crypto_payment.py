@@ -10,16 +10,31 @@ Free APIs used:
 
 import hashlib
 import logging
+import time
 import requests
 
 logger = logging.getLogger(__name__)
 
-# Subscription plan prices in USDT
-PLAN_PRICES_USDT = {
-    1: 12.00,
-    3: 34.00,
-    6: 65.00,
-}
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [1, 3, 7]  # seconds between attempts
+
+
+def _get_with_retry(url: str, headers: dict = None, params: dict = None, timeout: int = 12) -> requests.Response:
+    """GET with up to _MAX_RETRIES attempts and exponential-ish backoff."""
+    last_exc = None
+    for attempt, wait in enumerate(_RETRY_BACKOFF[:_MAX_RETRIES]):
+        try:
+            resp = requests.get(url, headers=headers or {}, params=params, timeout=timeout)
+            return resp
+        except requests.RequestException as e:
+            last_exc = e
+            if attempt < _MAX_RETRIES - 1:
+                logger.debug(f"[PAYMENT] Request failed (attempt {attempt+1}), retrying in {wait}s: {e}")
+                time.sleep(wait)
+    raise last_exc
+
+
+from config import PLAN_PRICES as PLAN_PRICES_USDT  # {1: price, 3: price, 6: price}
 
 # ── Network constants ─────────────────────────────────────────────────────────
 APTOS_NODE_URL      = "https://fullnode.mainnet.aptoslabs.com/v1"
@@ -103,7 +118,7 @@ def _verify_aptos(tx_hash: str, expected: float, months: int, recipient: str) ->
                 "error": "Invalid Aptos TX hash. Should be 0x followed by 64 hex characters."}
 
     try:
-        resp = requests.get(f"{APTOS_NODE_URL}/transactions/by_hash/{tx_hash}", timeout=12)
+        resp = _get_with_retry(f"{APTOS_NODE_URL}/transactions/by_hash/{tx_hash}", timeout=12)
     except Exception as e:
         return {"valid": False, "confirmed": False, "error": f"Network error: {e}"}
 
@@ -175,7 +190,7 @@ def _verify_tron(tx_hash: str, expected: float, months: int, recipient: str, api
         headers["TRON-PRO-API-KEY"] = api_key
 
     try:
-        resp = requests.get(f"{TRONGRID_BASE}/v1/transactions/{tx_hash}", headers=headers, timeout=12)
+        resp = _get_with_retry(f"{TRONGRID_BASE}/v1/transactions/{tx_hash}", headers=headers, timeout=12)
     except Exception as e:
         return {"valid": False, "confirmed": False, "error": f"Network error reaching TRON: {e}"}
 
@@ -267,7 +282,7 @@ def _verify_bsc(tx_hash: str, expected: float, months: int, recipient: str, api_
     }
 
     try:
-        resp = requests.get(BSCSCAN_BASE, params=params, timeout=12)
+        resp = _get_with_retry(BSCSCAN_BASE, params=params, timeout=12)
     except Exception as e:
         return {"valid": False, "confirmed": False, "error": f"Network error reaching BSCScan: {e}"}
 

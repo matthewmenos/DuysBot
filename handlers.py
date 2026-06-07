@@ -31,7 +31,7 @@ from database import (
 )
 from paystack import initialize_transaction, verify_transaction
 from crypto_payment import verify_usdt_tx, get_payment_instructions, PLAN_PRICES_USDT
-from config import TRONGRID_API_KEY, BSCSCAN_API_KEY
+from config import TRONGRID_API_KEY, BSCSCAN_API_KEY, PLAN_PRICES
 from referral import get_referral_link, get_referral_stats, resolve_start_referral, reward_referrer
 from logger_setup import report_error_to_admin, init_error_reporter
 from exchange import (
@@ -41,6 +41,19 @@ from exchange import (
     get_exchange_label, get_exchange_note, get_min_trade_amount,
 )
 from strategy import generate_signal
+from persistence import get_arb_sel, set_arb_sel, K_ARB_SEL
+from database import (
+    get_paper_balance, update_paper_balance, open_paper_trade,
+    get_open_paper_trades, get_paper_trade_history, get_paper_stats,
+    generate_webhook_token, get_webhook_token, get_webhook_logs,
+    create_dca_plan, get_dca_plans, set_dca_status, get_dca_stats, get_dca_plan,
+    create_grid_plan, get_active_grids, get_grid_plan, get_grid_orders,
+    set_grid_status, get_analytics_data, get_full_trade_history,
+    publish_strategy, get_strategies, get_strategy, subscribe_strategy,
+    unsubscribe_strategy, get_user_strategy_sub, get_strategy_leaderboard,
+    write_audit, get_audit_log, create_webdash_token,
+)
+from analytics import compute_analytics
 
 logger = logging.getLogger(__name__)
 
@@ -140,13 +153,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             nets_str = " • ".join(v["label"] for v in active_nets.values())
             crypto_line = f"\n<b>🪙 Crypto</b> — USDT via {nets_str}"
 
+        _p1, _p3, _p6 = PLAN_PRICES[1], PLAN_PRICES[3], PLAN_PRICES[6]
         await update.effective_message.reply_text(
             f"👋 Welcome to <b>CryptoTradeBot</b>, {user.first_name}!\n"
             f"{trial_section}\n"
             f"<b>📦 Subscription Plans</b>\n"
-            f"  • 1 Month  — $12.00\n"
-            f"  • 3 Months — $34.00  <i>(save $2)</i>\n"
-            f"  • 6 Months — $65.00  <i>(save $7)</i>\n\n"
+            f"  • 1 Month  — ${_p1:.2f}\n"
+            f"  • 3 Months — ${_p3:.2f}  <i>(save ${3*_p1-_p3:.0f})</i>\n"
+            f"  • 6 Months — ${_p6:.2f}  <i>(save ${6*_p1-_p6:.0f})</i>\n\n"
             f"<b>💳 Paystack</b> — Card, Mobile Money, Bank Transfer"
             f"{crypto_line}\n\n"
             f"Your Telegram ID: <code>{user.id}</code>\n"
@@ -982,13 +996,14 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nets_str = " • ".join(v["label"] for v in active_nets.values())
         crypto_section = f"<b>🪙 Crypto USDT</b> — {nets_str}\n"
 
+    _p1, _p3, _p6 = PLAN_PRICES[1], PLAN_PRICES[3], PLAN_PRICES[6]
     await update.effective_message.reply_text(
         f"🤖 <b>CryptoTradeBot — Subscribe</b>\n"
         f"{trial_section}\n"
         f"<b>📦 Plans</b>\n"
-        f"  • 1 Month  — $12.00\n"
-        f"  • 3 Months — $34.00  <i>(save $2)</i>\n"
-        f"  • 6 Months — $65.00  <i>(save $7)</i>\n\n"
+        f"  • 1 Month  — ${_p1:.2f}\n"
+        f"  • 3 Months — ${_p3:.2f}  <i>(save ${3*_p1-_p3:.0f})</i>\n"
+        f"  • 6 Months — ${_p6:.2f}  <i>(save ${6*_p1-_p6:.0f})</i>\n\n"
         f"<b>💳 Paystack</b> — Card, Mobile Money, Bank Transfer\n"
         f"{crypto_section}\n"
         f"Tap a button to get started:",
@@ -1636,6 +1651,37 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>⚡ Arbitrage</b>\n"
         "  /arbitrage     — Scan for cross-exchange &amp; triangular arbitrage\n"
         "                   Choose tokens, enable/disable, run on-demand scans\n\n"
+        "<b>🧪 Paper Trading</b>\n"
+        "  /paper         — Toggle paper trading on/off (simulated trades)\n"
+        "  /paper_reset   — Reset paper balance and history\n"
+        "  /paper_stats   — Paper trading performance summary\n\n"
+        "<b>🔄 DCA Bot</b>\n"
+        "  /dca           — Manage Dollar-Cost Averaging plans\n"
+        "  /dca_stats &lt;id&gt; — Stats for a specific DCA plan\n\n"
+        "<b>🔲 Grid Trading</b>\n"
+        "  /grid          — Manage grid trading plans\n"
+        "  /grid_status &lt;id&gt; — Grid order ladder and profit\n"
+        "  /grid_stop &lt;id&gt;   — Stop a grid and cancel all orders\n\n"
+        "<b>⏱ Smart Orders</b>\n"
+        "  /twap          — Time-Weighted Average Price order\n"
+        "  /iceberg       — Iceberg (hidden size) order\n"
+        "  /oco           — One-Cancels-the-Other order\n"
+        "  /smart_orders  — View all active smart orders\n\n"
+        "<b>📊 Analytics</b>\n"
+        "  /analytics [7d|30d|all] — Full performance report\n"
+        "  /backtest &lt;SYMBOL&gt; &lt;DAYS&gt; — Backtest signal strategy\n"
+        "  /webdash       — Get a 24h link to the web dashboard\n\n"
+        "<b>📡 TradingView</b>\n"
+        "  /webhook       — View your TradingView webhook URL\n"
+        "  /webhook_new   — Regenerate webhook token\n"
+        "  /webhook_log   — Last 10 webhook-triggered trades\n\n"
+        "<b>🏪 Strategy Marketplace</b>\n"
+        "  /market        — Browse published strategies\n"
+        "  /market publish &lt;name&gt; — Publish your current strategy\n"
+        "  /market subscribe &lt;id&gt; — Copy a strategy\n"
+        "  /market leaderboard — Top strategies by 30d PnL\n\n"
+        "<b>📋 Audit</b>\n"
+        "  /audit         — View your recent activity log\n\n"
         "<b>🌐 Preferences</b>\n"
         "  /timezone      — Set your timezone for daily reports\n"
         "  /status        — Bot and platform status\n"
@@ -1807,8 +1853,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("pay_"):
         months = int(data.split("_")[1])
-        prices = {1: 12.00, 3: 34.00, 6: 65.00}
-        amount = prices.get(months, 12.00)
+        amount = PLAN_PRICES.get(months, PLAN_PRICES[1])
 
         PENDING_INPUT[uid] = {"field": "pay_email", "months": months, "amount": amount}
         await query.message.reply_text(
@@ -1816,6 +1861,143 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Please send your <b>email address</b> so we can generate your payment link.",
             parse_mode=ParseMode.HTML
         )
+
+    # ── Paper trading callbacks ───────────────────────────────────────────────
+    elif data == "paper_reset_confirm":
+        update_setting(uid, "paper_balance",       1000.0)
+        update_setting(uid, "paper_start_balance", 1000.0)
+        with __import__("database").get_conn() as conn:
+            conn.execute("DELETE FROM paper_trades WHERE user_id=?", (uid,))
+        write_audit(uid, "paper_reset", {})
+        await query.message.reply_text(
+            "🧪 Paper account reset — balance restored to $1 000.00.",
+        )
+    elif data == "paper_reset_cancel":
+        await query.message.reply_text("Cancelled.")
+
+    # ── Webhook callbacks ─────────────────────────────────────────────────────
+    elif data == "webhook_regen_confirm":
+        token = generate_webhook_token(uid)
+        write_audit(uid, "webhook_token_regenerated", {})
+        await query.message.reply_text(
+            f"✅ New webhook token generated.\nUse /webhook to see your updated URL.",
+        )
+    elif data == "webhook_regen_cancel":
+        await query.message.reply_text("Cancelled — old token kept.")
+
+    # ── DCA callbacks ─────────────────────────────────────────────────────────
+    elif data == "dca_create":
+        PENDING_INPUT[uid] = {"field": "dca_symbol"}
+        await query.message.reply_text(
+            "🔄 <b>New DCA Plan</b>\n\nSend the symbol (e.g. <code>BTC/USDT</code>):",
+            parse_mode=ParseMode.HTML
+        )
+    elif data.startswith("dca_pause_"):
+        plan_id = int(data.split("_")[-1])
+        set_dca_status(plan_id, "paused")
+        write_audit(uid, "dca_paused", {"plan_id": plan_id})
+        await query.message.reply_text(f"⏸ DCA plan #{plan_id} paused.")
+    elif data.startswith("dca_resume_"):
+        plan_id = int(data.split("_")[-1])
+        set_dca_status(plan_id, "active")
+        write_audit(uid, "dca_resumed", {"plan_id": plan_id})
+        await query.message.reply_text(f"▶️ DCA plan #{plan_id} resumed.")
+    elif data.startswith("dca_delete_"):
+        plan_id = int(data.split("_")[-1])
+        set_dca_status(plan_id, "deleted")
+        write_audit(uid, "dca_deleted", {"plan_id": plan_id})
+        await query.message.reply_text(f"🗑 DCA plan #{plan_id} deleted.")
+    elif data.startswith("dca_stats_"):
+        plan_id = int(data.split("_")[-1])
+        context.args = [str(plan_id)]
+        await dca_stats_cmd(update, context)
+    elif data.startswith("dca_int_"):
+        interval_sec = int(data.split("_")[-1])
+        pi = PENDING_INPUT.get(uid, {})
+        if not pi or "symbol" not in pi or "amount" not in pi:
+            await query.message.reply_text("Session expired. Start over with /dca.")
+            return
+        user = get_user(uid)
+        if not user or not user.get("exchange"):
+            await query.message.reply_text("Connect an exchange first with /exchanges.")
+            del PENDING_INPUT[uid]
+            return
+        from config import MAX_DCA_PLANS
+        existing = get_dca_plans(uid)
+        active   = [p for p in existing if p["status"] == "active"]
+        if len(active) >= MAX_DCA_PLANS:
+            await query.message.reply_text(
+                f"⚠️ You've reached the maximum of {MAX_DCA_PLANS} active DCA plans."
+            )
+            del PENDING_INPUT[uid]
+            return
+        plan_id = create_dca_plan(
+            uid, user["exchange"], pi["symbol"], pi["amount"], interval_sec
+        )
+        del PENDING_INPUT[uid]
+        write_audit(uid, "dca_created", {"plan_id": plan_id, "symbol": pi["symbol"]})
+        hrs = interval_sec // 3600
+        await query.message.reply_text(
+            f"✅ <b>DCA Plan #{plan_id} Created</b>\n\n"
+            f"  Symbol:   <code>{pi['symbol']}</code>\n"
+            f"  Amount:   <code>${pi['amount']:.2f}</code> per buy\n"
+            f"  Interval: <code>every {hrs}h</code>\n\n"
+            f"First buy in {hrs}h. Use /dca to manage.",
+            parse_mode=ParseMode.HTML
+        )
+
+    # ── Grid callbacks ────────────────────────────────────────────────────────
+    elif data == "grid_create":
+        PENDING_INPUT[uid] = {"field": "grid_symbol"}
+        await query.message.reply_text(
+            "🔲 <b>New Grid Plan</b>\n\nSend the symbol (e.g. <code>BTC/USDT</code>):",
+            parse_mode=ParseMode.HTML
+        )
+
+    # ── Strategy marketplace callbacks ────────────────────────────────────────
+    elif data.startswith("strat_sub_"):
+        strat_id = int(data.split("_")[-1])
+        strat    = get_strategy(strat_id)
+        if not strat:
+            await query.answer("Strategy not found.", show_alert=True)
+            return
+        keyboard = [[
+            InlineKeyboardButton("✅ Confirm Subscribe", callback_data=f"strat_sub_confirm_{strat_id}"),
+            InlineKeyboardButton("❌ Cancel",             callback_data="strat_sub_cancel"),
+        ]]
+        await query.message.reply_text(
+            f"Subscribe to <b>{strat['name']}</b>?\n\n"
+            f"This will update your: symbol, TP/SL, and trade mode.\n"
+            f"You can revert with /market unsubscribe.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+    elif data.startswith("strat_sub_confirm_"):
+        import json as _j
+        strat_id = int(data.split("_")[-1])
+        strat    = get_strategy(strat_id)
+        if not strat:
+            await query.answer("Strategy not found.", show_alert=True)
+            return
+        curr = get_settings(uid)
+        prev = _j.dumps({k: curr.get(k) for k in
+                         ("symbol","take_profit","stop_loss","tp_mode","sl_mode","trade_mode")})
+        for k, v in [("symbol", strat["symbol"]), ("take_profit", strat["take_profit"]),
+                     ("stop_loss", strat["stop_loss"]), ("tp_mode", strat["tp_mode"]),
+                     ("sl_mode", strat["sl_mode"]), ("trade_mode", strat["trade_mode"])]:
+            if v is not None:
+                update_setting(uid, k, v)
+        subscribe_strategy(uid, strat_id, prev)
+        write_audit(uid, "strategy_subscribed", {"strategy_id": strat_id})
+        await query.message.reply_text(
+            f"✅ Subscribed to <b>{strat['name']}</b>. Settings updated.",
+            parse_mode=ParseMode.HTML
+        )
+    elif data == "strat_sub_cancel":
+        await query.message.reply_text("Cancelled.")
+    elif data == "strat_leaderboard":
+        context.args = ["leaderboard"]
+        await market_cmd(update, context)
 
     # ── Direct command callbacks (inline dashboard buttons) ──────────────────
     elif data in BUTTON_MAP:
@@ -1926,29 +2108,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("arb_sym_"):
         action = data[8:]   # e.g. "BTC/USDT", "all", "none", "save"
-        # Retrieve current in-progress selection from user state
-        state_key = f"arb_sel_{uid}"
-        current_raw = context.bot_data.get(state_key)
+
+        # Retrieve current in-progress selection from persisted bot_data
+        current_raw = get_arb_sel(context.bot_data, uid)
         if current_raw is None:
-            existing = _get_arb_symbols(uid)
+            existing   = _get_arb_symbols(uid)
             current_sel = set(existing) if existing else set(ARB_SYMBOL_OPTIONS)
         else:
             current_sel = set(current_raw)
 
         if action == "all":
             current_sel = set(ARB_SYMBOL_OPTIONS)
-            context.bot_data[state_key] = list(current_sel)
+            set_arb_sel(context.bot_data, uid, list(current_sel))
             await query.edit_message_reply_markup(reply_markup=_build_arb_symbol_keyboard(current_sel))
 
         elif action == "none":
             current_sel = set()
-            context.bot_data[state_key] = list(current_sel)
+            set_arb_sel(context.bot_data, uid, list(current_sel))
             await query.edit_message_reply_markup(reply_markup=_build_arb_symbol_keyboard(current_sel))
 
         elif action == "save":
             syms = sorted(current_sel) if current_sel else None
             update_setting(uid, "arb_symbols", __import__("json").dumps(syms) if syms else None)
-            context.bot_data.pop(state_key, None)
+            set_arb_sel(context.bot_data, uid, None)   # clear draft
             sym_display = ", ".join(syms) if syms else "all defaults"
             wait_msg = await query.message.reply_text(
                 f"✅ <b>Tokens saved:</b> <code>{sym_display}</code>\n\n"
@@ -1957,19 +2139,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await _arb_run_scan(update, context, edit_msg=wait_msg)
 
-        elif "/" in action:   # it's a symbol toggle like "BTC/USDT"
-            sym = action   # already the full symbol
-            if sym in current_sel:
-                current_sel.discard(sym)
+        elif "/" in action:   # symbol toggle e.g. "BTC/USDT"
+            if action in current_sel:
+                current_sel.discard(action)
             else:
-                current_sel.add(sym)
-            context.bot_data[state_key] = list(current_sel)
+                current_sel.add(action)
+            set_arb_sel(context.bot_data, uid, list(current_sel))
             try:
                 await query.edit_message_reply_markup(
                     reply_markup=_build_arb_symbol_keyboard(current_sel)
                 )
             except Exception:
-                pass   # message unchanged — Telegram rejects identical markup edits
+                pass   # Telegram rejects edit when markup is identical
 
     elif data == "toggle_trade_mode":
         s   = get_settings(uid)
@@ -2913,6 +3094,158 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML
             )
 
+    # ── DCA multi-step wizard ─────────────────────────────────────────────────
+    elif field == "dca_symbol":
+        symbol = text.upper()
+        if "/" not in symbol:
+            symbol += "/USDT"
+        PENDING_INPUT[uid]["symbol"] = symbol
+        PENDING_INPUT[uid]["field"]  = "dca_amount"
+        await update.effective_message.reply_text(
+            f"Symbol: <code>{symbol}</code>\n\nHow much USDT per buy? (e.g. <code>50</code>)",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif field == "dca_amount":
+        try:
+            amount = float(text)
+            assert amount >= 5
+        except Exception:
+            await update.effective_message.reply_text("Enter a valid amount (min $5).")
+            return
+        PENDING_INPUT[uid]["amount"] = amount
+        PENDING_INPUT[uid]["field"]  = "dca_interval"
+        keyboard = [[
+            InlineKeyboardButton("1h",   callback_data="dca_int_3600"),
+            InlineKeyboardButton("4h",   callback_data="dca_int_14400"),
+            InlineKeyboardButton("8h",   callback_data="dca_int_28800"),
+            InlineKeyboardButton("24h",  callback_data="dca_int_86400"),
+            InlineKeyboardButton("7d",   callback_data="dca_int_604800"),
+        ]]
+        await update.effective_message.reply_text(
+            "Choose buy interval:", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    # ── Grid multi-step wizard ────────────────────────────────────────────────
+    elif field == "grid_symbol":
+        symbol = text.upper()
+        if "/" not in symbol:
+            symbol += "/USDT"
+        PENDING_INPUT[uid]["symbol"] = symbol
+        PENDING_INPUT[uid]["field"]  = "grid_lower"
+        await update.effective_message.reply_text(
+            f"Symbol: <code>{symbol}</code>\n\nEnter the <b>lower price</b> of the grid range:",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif field == "grid_lower":
+        try:
+            lower = float(text)
+        except ValueError:
+            await update.effective_message.reply_text("Enter a valid price.")
+            return
+        PENDING_INPUT[uid]["lower"] = lower
+        PENDING_INPUT[uid]["field"] = "grid_upper"
+        await update.effective_message.reply_text("Enter the <b>upper price</b>:",
+                                                   parse_mode=ParseMode.HTML)
+
+    elif field == "grid_upper":
+        try:
+            upper = float(text)
+            lower = PENDING_INPUT[uid].get("lower", 0)
+            assert upper > lower
+        except Exception:
+            await update.effective_message.reply_text("Upper must be greater than lower price.")
+            return
+        PENDING_INPUT[uid]["upper"] = upper
+        PENDING_INPUT[uid]["field"] = "grid_levels"
+        await update.effective_message.reply_text(
+            f"Range: <code>${lower:.4f} – ${upper:.4f}</code>\n\n"
+            "How many grid levels? (5–20)",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif field == "grid_levels":
+        try:
+            levels = int(text)
+            assert 5 <= levels <= 20
+        except Exception:
+            await update.effective_message.reply_text("Enter a number between 5 and 20.")
+            return
+        PENDING_INPUT[uid]["levels"] = levels
+        PENDING_INPUT[uid]["field"]  = "grid_usdt"
+        await update.effective_message.reply_text(
+            f"Levels: <code>{levels}</code>\n\nTotal USDT to allocate for this grid:",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif field == "grid_usdt":
+        import asyncio as _asyncio
+        try:
+            total_usdt = float(text)
+            assert total_usdt >= 10
+        except Exception:
+            await update.effective_message.reply_text("Enter a valid USDT amount (min $10).")
+            return
+
+        pi     = PENDING_INPUT[uid]
+        symbol = pi["symbol"]
+        lower  = pi["lower"]
+        upper  = pi["upper"]
+        levels = pi["levels"]
+        user   = get_user(uid)
+        del PENDING_INPUT[uid]
+
+        if not user or not user.get("exchange"):
+            await update.effective_message.reply_text("Connect an exchange first with /exchanges.")
+            return
+
+        msg = await update.effective_message.reply_text("⏳ Placing grid orders…")
+        try:
+            creds   = get_exchange_creds(uid, user["exchange"])
+            exch    = get_exchange(user["exchange"], creds["api_key"],
+                                   creds["api_secret"], creds.get("api_pass", ""))
+            plan_id = create_grid_plan(uid, user["exchange"], symbol, lower, upper, levels, total_usdt)
+            usdt_per = total_usdt / levels
+            prices   = [lower + (upper - lower) / (levels - 1) * i for i in range(levels)]
+            placed   = 0
+
+            for price in prices:
+                try:
+                    qty     = usdt_per / price
+                    ticker  = await _asyncio.to_thread(fetch_ticker, exch, symbol)
+                    side    = "buy" if price <= ticker["last"] else "sell"
+                    from exchange import place_limit_order
+                    order   = await _asyncio.to_thread(place_limit_order, exch, symbol, side, qty, price)
+                    from database import add_grid_order
+                    add_grid_order(plan_id, order["id"], side, price, qty)
+                    placed += 1
+                except Exception as e:
+                    logger.warning(f"[GRID] Place order at {price}: {e}")
+
+            if placed == 0:
+                set_grid_status(plan_id, "stopped")
+                await msg.edit_text("❌ Could not place any grid orders. Check exchange balance.")
+                return
+
+            write_audit(uid, "grid_created", {
+                "plan_id": plan_id, "symbol": symbol,
+                "levels": levels, "placed": placed
+            })
+            await msg.edit_text(
+                f"✅ <b>Grid Created #{plan_id}</b>\n\n"
+                f"  Symbol:  <code>{symbol}</code>\n"
+                f"  Range:   <code>${lower:.4f} – ${upper:.4f}</code>\n"
+                f"  Levels:  <code>{levels}</code>  ({placed} orders placed)\n"
+                f"  Capital: <code>${total_usdt:.2f}</code>\n\n"
+                f"Use /grid_status {plan_id} to monitor.",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.error(f"grid_create uid={uid}: {e}", exc_info=True)
+            await msg.edit_text(f"❌ Grid creation failed: {e}")
+            await report_error_to_admin(context, e, f"grid_create uid={uid}")
+
 
 # ── BUTTON_MAP: wire callback_data keys to real handler functions ──────────────
 # These are imported lazily after all functions are defined.
@@ -2971,11 +3304,24 @@ def _build_button_map():
         "cmd_status":      _make_cmd(bot_status),
         "cmd_timezone":    _make_cmd(timezone_cmd),
         "cmd_arbitrage":   _make_cmd(arbitrage_cmd),
+        "cmd_paper":       _make_cmd(paper_cmd),
+        "cmd_paper_stats": _make_cmd(paper_stats_cmd),
+        "cmd_dca":         _make_cmd(dca_cmd),
+        "cmd_grid":        _make_cmd(grid_cmd),
+        "cmd_analytics":   _make_cmd(analytics_cmd),
+        "cmd_audit":       _make_cmd(audit_cmd),
+        "cmd_market":      _make_cmd(market_cmd),
+        "cmd_webhook":     _make_cmd(webhook_cmd),
+        "cmd_smart_orders":_make_cmd(smart_orders_cmd),
     }
 
 
-# Build the map after all handlers are defined
-# to avoid NameError for handler functions declared later in this module.
+# Build the map at module load time
+# BUTTON_MAP.update(_build_button_map())
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# /arbitrage — on-demand arbitrage scan  +  symbol picker  +  enable/disable
 # ═════════════════════════════════════════════════════════════════════════════
 
 import json as _json
@@ -3282,5 +3628,831 @@ async def _arb_run_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, edit
             pass
 
 
-# Build the button map after all handlers are defined.
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE HANDLERS — Paper Trading, Backtest, Analytics, Webhook, DCA,
+#                    Grid, Smart Orders, Strategy Marketplace, Audit
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Paper Trading ─────────────────────────────────────────────────────────────
+
+async def paper_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required. Use /subscribe.")
+        return
+    s = get_settings(uid)
+    current = bool(s.get("paper_mode", 0))
+    new_mode = 0 if current else 1
+    update_setting(uid, "paper_mode", new_mode)
+    write_audit(uid, "setting_change", {"key": "paper_mode", "old": current, "new": bool(new_mode)})
+    if new_mode:
+        bal = get_paper_balance(uid)
+        start_bal = s.get("paper_start_balance", 1000.0)
+        await update.effective_message.reply_text(
+            f"🧪 <b>Paper Trading ON</b>\n\n"
+            f"Paper balance: <code>${bal:.2f} USDT</code>\n"
+            f"Starting balance: <code>${start_bal:.2f} USDT</code>\n\n"
+            f"All trades will now be <b>simulated</b> — no real orders placed.\n"
+            f"Use /paper_stats to track performance.",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.effective_message.reply_text(
+            "✅ <b>Paper Trading OFF</b>\n\nLive trading is now active.",
+            parse_mode=ParseMode.HTML
+        )
+
+
+async def paper_reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    keyboard = [[
+        InlineKeyboardButton("✅ Confirm Reset", callback_data="paper_reset_confirm"),
+        InlineKeyboardButton("❌ Cancel",         callback_data="paper_reset_cancel"),
+    ]]
+    await update.effective_message.reply_text(
+        "⚠️ This will reset your paper balance to $1 000 and clear all paper trade history.\nAre you sure?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def paper_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    stats = get_paper_stats(uid)
+    bal   = get_paper_balance(uid)
+    s     = get_settings(uid)
+    start = s.get("paper_start_balance", 1000.0)
+    total = stats.get("total", 0)
+    if total == 0:
+        await update.effective_message.reply_text("🧪 No paper trades yet. Enable paper mode with /paper.")
+        return
+    wins  = stats.get("wins", 0)
+    losses= stats.get("losses", 0)
+    wr    = wins / total * 100 if total else 0
+    pnl   = stats.get("total_pnl", 0)
+    pnl_pct = (bal - start) / start * 100 if start else 0
+    await update.effective_message.reply_text(
+        f"🧪 <b>Paper Trading Stats</b>\n\n"
+        f"  Balance:    <code>${bal:.2f}</code> (started ${start:.2f})\n"
+        f"  Total PnL:  <code>${pnl:+.4f}  ({pnl_pct:+.2f}%)</code>\n"
+        f"  Trades:     <code>{total}</code>  ({wins}W / {losses}L)\n"
+        f"  Win rate:   <code>{wr:.1f}%</code>\n"
+        f"  Best trade: <code>{stats.get('best_pct', 0):+.2f}%</code>\n"
+        f"  Worst:      <code>{stats.get('worst_pct', 0):+.2f}%</code>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+# ── Backtesting ───────────────────────────────────────────────────────────────
+
+async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import asyncio as _asyncio
+    from backtest import run_backtest
+
+    uid  = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+
+    args = context.args or []
+    if len(args) < 2:
+        await update.effective_message.reply_text(
+            "Usage: /backtest SYMBOL DAYS\nExample: /backtest BTC/USDT 90"
+        )
+        return
+
+    symbol = args[0].upper()
+    try:
+        days = int(args[1])
+        if days < 7 or days > 365:
+            raise ValueError
+    except ValueError:
+        await update.effective_message.reply_text("Days must be between 7 and 365.")
+        return
+
+    user = get_user(uid)
+    if not user or not user.get("exchange"):
+        await update.effective_message.reply_text("Connect an exchange first with /exchanges.")
+        return
+
+    msg = await update.effective_message.reply_text(
+        f"⏳ Running backtest for <b>{symbol}</b> over <b>{days} days</b>…",
+        parse_mode=ParseMode.HTML
+    )
+    try:
+        creds = get_exchange_creds(uid, user["exchange"])
+        if not creds:
+            await msg.edit_text("❌ No credentials found. Reconnect your exchange.")
+            return
+        exch = get_exchange(user["exchange"], creds["api_key"],
+                            creds["api_secret"], creds.get("api_pass", ""))
+        limit = min(days * 24, 1000)
+        ohlcv = await _asyncio.to_thread(fetch_ohlcv, exch, symbol, "1h", limit)
+
+        s = get_settings(uid)
+        result = await _asyncio.to_thread(
+            run_backtest,
+            ohlcv,
+            s.get("take_profit", 2.0),
+            s.get("stop_loss",   1.0),
+            s.get("tp_mode",     "pct"),
+            s.get("sl_mode",     "pct"),
+            symbol,
+        )
+        await msg.edit_text(result.format_telegram(), parse_mode=ParseMode.HTML)
+    except ValueError as e:
+        await msg.edit_text(f"⚠️ {e}")
+    except Exception as e:
+        logger.error(f"backtest_cmd uid={uid}: {e}", exc_info=True)
+        await msg.edit_text(f"❌ Backtest failed: {e}")
+        await report_error_to_admin(context, e, f"backtest uid={uid}")
+
+
+# ── Analytics ─────────────────────────────────────────────────────────────────
+
+async def analytics_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import asyncio as _asyncio
+
+    uid  = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+
+    args = context.args or []
+    period_map = {"7d": 7, "30d": 30, "90d": 90, "all": 0}
+    period_str = args[0].lower() if args else "30d"
+    days = period_map.get(period_str, 30)
+
+    msg = await update.effective_message.reply_text("📊 Computing analytics…")
+    try:
+        trades = await _asyncio.to_thread(get_full_trade_history, uid, days)
+        result = await _asyncio.to_thread(compute_analytics, trades, days or 9999)
+        if result.total_trades < 5:
+            await msg.edit_text(
+                f"📊 Not enough data yet (<5 trades in the selected period).\n"
+                f"Keep trading and check back soon!",
+            )
+            return
+        await msg.edit_text(result.format_telegram(), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"analytics_cmd uid={uid}: {e}", exc_info=True)
+        await msg.edit_text(f"❌ Error: {e}")
+        await report_error_to_admin(context, e, f"analytics uid={uid}")
+
+
+async def webdash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+    token = create_webdash_token(uid)
+    from config import BOT_WEBHOOK_URL
+    base  = BOT_WEBHOOK_URL.rstrip("/") if BOT_WEBHOOK_URL else "https://yourdomain.com"
+    url   = f"{base}/dashboard/{token}"
+    await update.effective_message.reply_text(
+        f"📊 <b>Web Dashboard</b>\n\n"
+        f"<a href='{url}'>Open Dashboard →</a>\n\n"
+        f"⏳ Link valid for <b>24 hours</b>.\n"
+        f"Use /webdash to generate a new one.",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
+
+
+# ── TradingView Webhook ────────────────────────────────────────────────────────
+
+async def webhook_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+    token = get_webhook_token(uid)
+    if not token:
+        token = generate_webhook_token(uid)
+    from config import BOT_WEBHOOK_URL, WEBHOOK_PORT
+    base = BOT_WEBHOOK_URL.rstrip("/") if BOT_WEBHOOK_URL else "https://yourdomain.com"
+    url  = f"{base.replace(str(WEBHOOK_PORT), str(WEBHOOK_PORT + 1))}/tv/{token}"
+    await update.effective_message.reply_text(
+        f"📡 <b>TradingView Webhook</b>\n\n"
+        f"POST to:\n<code>{url}</code>\n\n"
+        f"<b>Payload format:</b>\n"
+        f"<code>{{\n"
+        f'  "token": "{token[:8]}…",\n'
+        f'  "action": "buy" | "sell" | "close",\n'
+        f'  "symbol": "BTCUSDT",\n'
+        f'  "exchange": "binance",\n'
+        f'  "amount": 100.0\n'
+        f"}}</code>\n\n"
+        f"Use /webhook_new to regenerate your token.",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def webhook_new_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    keyboard = [[
+        InlineKeyboardButton("✅ Regenerate Token", callback_data="webhook_regen_confirm"),
+        InlineKeyboardButton("❌ Cancel",            callback_data="webhook_regen_cancel"),
+    ]]
+    await update.effective_message.reply_text(
+        "⚠️ Regenerating your webhook token will <b>immediately invalidate</b> "
+        "your current token. TradingView alerts using the old URL will fail.\n\nProceed?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def webhook_log_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    logs = get_webhook_logs(uid, 10)
+    if not logs:
+        await update.effective_message.reply_text("No webhook activity yet.")
+        return
+    lines = ["📡 <b>Webhook Log (last 10)</b>\n"]
+    for log in logs:
+        icon = "✅" if log["status"] == "executed" else ("⏳" if log["status"] == "queued" else "❌")
+        lines.append(
+            f"{icon} <code>{log['action'].upper()} {log['symbol']}</code>  "
+            f"{log['status']}  <i>{(log['created_at'] or '')[:16]}</i>"
+        )
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+# ── DCA Bot ───────────────────────────────────────────────────────────────────
+
+async def dca_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+    plans = get_dca_plans(uid)
+    from config import MAX_DCA_PLANS
+
+    if not plans:
+        keyboard = [[InlineKeyboardButton("➕ Create DCA Plan", callback_data="dca_create")]]
+        await update.effective_message.reply_text(
+            "🔄 <b>DCA Bot</b>\n\nNo active plans. Create one to start dollar-cost averaging.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    lines = ["🔄 <b>Your DCA Plans</b>\n"]
+    for p in plans:
+        status_icon = "▶️" if p["status"] == "active" else "⏸"
+        interval_h  = p["interval_sec"] // 3600
+        lines.append(
+            f"{status_icon} <b>#{p['id']} {p['symbol']}</b>\n"
+            f"  Amount: <code>${p['amount_usdt']:.2f}</code> every {interval_h}h\n"
+            f"  Invested: <code>${p['total_invested']:.2f}</code>  "
+            f"Runs: <code>{p['runs_completed']}</code>\n"
+            f"  Next: <code>{(p['next_run_at'] or '')[:16]}</code>"
+        )
+
+    buttons = [[InlineKeyboardButton("➕ New Plan", callback_data="dca_create")]] \
+              if len(plans) < MAX_DCA_PLANS else []
+    buttons.append([InlineKeyboardButton("📊 Stats", callback_data=f"dca_stats_{plans[0]['id']}")])
+
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def dca_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Usage: /dca_stats <plan_id>")
+        return
+    try:
+        plan_id = int(args[0])
+    except ValueError:
+        await update.effective_message.reply_text("Invalid plan ID.")
+        return
+
+    stats = get_dca_stats(plan_id)
+    if not stats:
+        await update.effective_message.reply_text("Plan not found.")
+        return
+    plan = stats["plan"]
+    if plan["user_id"] != uid and not is_admin(uid):
+        await update.effective_message.reply_text("Not your plan.")
+        return
+
+    # Try to get live price
+    live_val = None
+    try:
+        creds = get_exchange_creds(uid, plan["exchange_id"])
+        if creds:
+            exch = get_exchange(plan["exchange_id"], creds["api_key"],
+                                creds["api_secret"], creds.get("api_pass", ""))
+            import asyncio as _asyncio
+            ticker = await _asyncio.to_thread(fetch_ticker, exch, plan["symbol"])
+            live_price = ticker["last"]
+            live_val   = stats["total_bought"] * live_price
+    except Exception:
+        pass
+
+    pnl_usdt = (live_val - stats["total_invested"]) if live_val else None
+    pnl_str  = f"${pnl_usdt:+.4f}" if pnl_usdt is not None else "N/A (fetch price failed)"
+
+    await update.effective_message.reply_text(
+        f"📊 <b>DCA Plan #{plan_id} — {plan['symbol']}</b>\n\n"
+        f"  Total invested:  <code>${stats['total_invested']:.2f}</code>\n"
+        f"  Total bought:    <code>{stats['total_bought']:.6f}</code>\n"
+        f"  Avg entry price: <code>${stats['avg_price']:.4f}</code>\n"
+        f"  Runs completed:  <code>{stats['runs']}</code>\n"
+        f"  Current value:   <code>${live_val:.2f}</code>\n" if live_val else
+        f"  Current value:   <code>N/A</code>\n"
+        f"  Unrealised PnL:  <code>{pnl_str}</code>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+# ── Grid Trading ──────────────────────────────────────────────────────────────
+
+async def grid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+    grids = get_active_grids(uid)
+    keyboard = [[InlineKeyboardButton("➕ New Grid", callback_data="grid_create")]]
+    if not grids:
+        await update.effective_message.reply_text(
+            "🔲 <b>Grid Trading</b>\n\nNo active grids.\n"
+            "A grid places buy/sell orders at regular price intervals, profiting from oscillation.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+        return
+    lines = ["🔲 <b>Active Grids</b>\n"]
+    for g in grids:
+        lines.append(
+            f"  <b>#{g['id']} {g['symbol']}</b>\n"
+            f"  Range: <code>${g['lower_price']:.2f} – ${g['upper_price']:.2f}</code>  "
+            f"Levels: <code>{g['grid_levels']}</code>\n"
+            f"  Profit: <code>${g['total_profit']:.4f}</code>"
+        )
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def grid_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Usage: /grid_status <plan_id>")
+        return
+    try:
+        plan_id = int(args[0])
+    except ValueError:
+        await update.effective_message.reply_text("Invalid plan ID.")
+        return
+    plan = get_grid_plan(plan_id)
+    if not plan or plan["user_id"] != uid:
+        await update.effective_message.reply_text("Plan not found.")
+        return
+    orders = get_grid_orders(plan_id)
+
+    # Build visual price ladder
+    ladder_lines = []
+    try:
+        creds = get_exchange_creds(uid, plan["exchange_id"])
+        exch  = get_exchange(plan["exchange_id"], creds["api_key"],
+                             creds["api_secret"], creds.get("api_pass", ""))
+        import asyncio as _asyncio
+        ticker = await _asyncio.to_thread(fetch_ticker, exch, plan["symbol"])
+        cur_price = ticker["last"]
+    except Exception:
+        cur_price = None
+
+    prices = sorted(set(o["price"] for o in orders), reverse=True)
+    for price in prices[:15]:
+        order = next((o for o in orders if abs(o["price"] - price) < 0.001), None)
+        if order:
+            status_icon = "✅" if order["status"] == "filled" else ("⬜" if order["status"] == "open" else "❌")
+            side_label  = "SELL" if order["side"] == "sell" else "BUY "
+            cur_marker  = " 📍" if cur_price and abs(cur_price - price) / price < 0.005 else ""
+            ladder_lines.append(
+                f"  {status_icon} {side_label} @ <code>${price:.4f}</code>{cur_marker}"
+            )
+
+    await update.effective_message.reply_text(
+        f"🔲 <b>Grid #{plan_id} — {plan['symbol']}</b>\n\n"
+        f"  Range: <code>${plan['lower_price']:.2f} – ${plan['upper_price']:.2f}</code>\n"
+        f"  Profit captured: <code>${plan['total_profit']:.4f}</code>\n\n"
+        f"<b>Price Ladder:</b>\n" + "\n".join(ladder_lines),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def grid_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import asyncio as _asyncio
+    uid  = update.effective_user.id
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Usage: /grid_stop <plan_id>")
+        return
+    try:
+        plan_id = int(args[0])
+    except ValueError:
+        await update.effective_message.reply_text("Invalid plan ID.")
+        return
+    plan = get_grid_plan(plan_id)
+    if not plan or plan["user_id"] != uid:
+        await update.effective_message.reply_text("Plan not found.")
+        return
+
+    msg = await update.effective_message.reply_text("⏳ Cancelling all grid orders…")
+    try:
+        creds = get_exchange_creds(uid, plan["exchange_id"])
+        exch  = get_exchange(plan["exchange_id"], creds["api_key"],
+                             creds["api_secret"], creds.get("api_pass", ""))
+        orders = get_grid_orders(plan_id)
+        cancelled = 0
+        for o in orders:
+            if o["status"] == "open":
+                try:
+                    await _asyncio.to_thread(exch.cancel_order, o["order_id"], plan["symbol"])
+                    from database import update_grid_order_status
+                    update_grid_order_status(o["id"], "cancelled")
+                    cancelled += 1
+                except Exception:
+                    pass
+        set_grid_status(plan_id, "stopped")
+        write_audit(uid, "grid_stopped", {"plan_id": plan_id, "cancelled_orders": cancelled})
+        await msg.edit_text(
+            f"✅ <b>Grid #{plan_id} Stopped</b>\n\n"
+            f"Cancelled {cancelled} open orders.\n"
+            f"Total profit captured: <code>${plan['total_profit']:.4f}</code>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await msg.edit_text(f"❌ Error stopping grid: {e}")
+        await report_error_to_admin(context, e, f"grid_stop uid={uid}")
+
+
+# ── Smart Orders ──────────────────────────────────────────────────────────────
+
+async def twap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import asyncio as _asyncio
+    from smart_orders import create_smart_order
+
+    uid  = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+
+    args = context.args or []
+    if len(args) < 5:
+        await update.effective_message.reply_text(
+            "Usage: /twap SYMBOL SIDE TOTAL_USDT SLICES INTERVAL_MINUTES\n"
+            "Example: /twap BTC/USDT buy 1000 10 5"
+        )
+        return
+    try:
+        symbol  = args[0].upper()
+        side    = args[1].lower()
+        total   = float(args[2])
+        slices  = int(args[3])
+        mins    = int(args[4])
+        assert side in ("buy", "sell") and slices >= 2 and mins >= 1 and total >= 10
+    except Exception:
+        await update.effective_message.reply_text("Invalid parameters. Check format.")
+        return
+
+    user = get_user(uid)
+    if not user or not user.get("exchange"):
+        await update.effective_message.reply_text("Connect an exchange first.")
+        return
+
+    order_id = create_smart_order(
+        uid, user["exchange"], "twap", symbol, side, total,
+        {"slices": slices, "interval_sec": mins * 60}
+    )
+    write_audit(uid, "twap_created", {
+        "order_id": order_id, "symbol": symbol, "total": total, "slices": slices
+    })
+    await update.effective_message.reply_text(
+        f"⏱ <b>TWAP Order Created #{order_id}</b>\n\n"
+        f"  Symbol:   <code>{symbol}</code>\n"
+        f"  Side:     <code>{side.upper()}</code>\n"
+        f"  Total:    <code>${total:.2f}</code>\n"
+        f"  Slices:   <code>{slices}</code> × <code>${total/slices:.2f}</code>\n"
+        f"  Interval: <code>every {mins} min</code>\n\n"
+        f"First slice executes in {mins} min.",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def iceberg_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from smart_orders import create_smart_order, place_iceberg_chunk, add_smart_order_leg
+    import asyncio as _asyncio
+
+    uid  = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+
+    args = context.args or []
+    if len(args) < 4:
+        await update.effective_message.reply_text(
+            "Usage: /iceberg SYMBOL SIDE TOTAL_USDT VISIBLE_PCT\n"
+            "Example: /iceberg ETH/USDT buy 500 20  (shows 20% at a time)"
+        )
+        return
+    try:
+        symbol  = args[0].upper()
+        side    = args[1].lower()
+        total   = float(args[2])
+        vis_pct = float(args[3])
+        assert side in ("buy", "sell") and 5 <= vis_pct <= 50 and total >= 10
+    except Exception:
+        await update.effective_message.reply_text("Invalid parameters.")
+        return
+
+    user = get_user(uid)
+    if not user or not user.get("exchange"):
+        await update.effective_message.reply_text("Connect an exchange first.")
+        return
+
+    msg = await update.effective_message.reply_text("⏳ Placing first iceberg chunk…")
+    try:
+        creds = get_exchange_creds(uid, user["exchange"])
+        exch  = get_exchange(user["exchange"], creds["api_key"],
+                             creds["api_secret"], creds.get("api_pass", ""))
+        ticker = await _asyncio.to_thread(fetch_ticker, exch, symbol)
+        price  = ticker["last"]
+        chunk  = total * vis_pct / 100
+
+        order_id = create_smart_order(
+            uid, user["exchange"], "iceberg", symbol, side, total,
+            {"visible_pct": vis_pct}
+        )
+        first_order = await _asyncio.to_thread(
+            place_iceberg_chunk, exch, symbol, side, chunk, price
+        )
+        add_smart_order_leg(order_id, first_order["id"], side, price, chunk / price, "open")
+        write_audit(uid, "iceberg_created", {"order_id": order_id, "symbol": symbol})
+        await msg.edit_text(
+            f"🧊 <b>Iceberg Order Created #{order_id}</b>\n\n"
+            f"  Symbol:  <code>{symbol}</code>  Side: <code>{side.upper()}</code>\n"
+            f"  Total:   <code>${total:.2f}</code>\n"
+            f"  Visible: <code>{vis_pct:.0f}%</code> (${chunk:.2f}) at a time\n\n"
+            f"First chunk placed @ ~<code>${price:.4f}</code>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {e}")
+        await report_error_to_admin(context, e, f"iceberg uid={uid}")
+
+
+async def oco_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from smart_orders import create_smart_order, place_oco_legs
+    import asyncio as _asyncio
+
+    uid  = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+
+    args = context.args or []
+    if len(args) < 5:
+        await update.effective_message.reply_text(
+            "Usage: /oco SYMBOL SIDE AMOUNT TP_PRICE SL_PRICE\n"
+            "Example: /oco BTC/USDT sell 100 70000 60000"
+        )
+        return
+    try:
+        symbol   = args[0].upper()
+        side     = args[1].lower()
+        amount   = float(args[2])
+        tp_price = float(args[3])
+        sl_price = float(args[4])
+        assert side in ("buy", "sell") and tp_price != sl_price and amount >= 5
+    except Exception:
+        await update.effective_message.reply_text("Invalid parameters.")
+        return
+
+    user = get_user(uid)
+    if not user or not user.get("exchange"):
+        await update.effective_message.reply_text("Connect an exchange first.")
+        return
+
+    msg = await update.effective_message.reply_text("⏳ Placing OCO orders…")
+    try:
+        creds = get_exchange_creds(uid, user["exchange"])
+        exch  = get_exchange(user["exchange"], creds["api_key"],
+                             creds["api_secret"], creds.get("api_pass", ""))
+        order_id = create_smart_order(
+            uid, user["exchange"], "oco", symbol, side, amount,
+            {"tp_price": tp_price, "sl_price": sl_price}
+        )
+        await _asyncio.to_thread(
+            place_oco_legs, exch, symbol, side, amount, tp_price, sl_price, order_id
+        )
+        write_audit(uid, "oco_created", {
+            "order_id": order_id, "symbol": symbol,
+            "tp": tp_price, "sl": sl_price
+        })
+        await msg.edit_text(
+            f"🎯 <b>OCO Order Created #{order_id}</b>\n\n"
+            f"  Symbol:    <code>{symbol}</code>\n"
+            f"  Side:      <code>{side.upper()}</code>\n"
+            f"  TP target: <code>${tp_price:,.4f}</code>\n"
+            f"  SL target: <code>${sl_price:,.4f}</code>\n\n"
+            f"Both orders placed. When one fills, the other cancels automatically.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {e}")
+        await report_error_to_admin(context, e, f"oco uid={uid}")
+
+
+async def smart_orders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from smart_orders import get_active_smart_orders
+    uid   = update.effective_user.id
+    orders = get_active_smart_orders(uid)
+    if not orders:
+        await update.effective_message.reply_text("No active smart orders.")
+        return
+    lines = ["⚙️ <b>Active Smart Orders</b>\n"]
+    for o in orders:
+        lines.append(
+            f"  <b>#{o['id']} {o['type'].upper()}</b> — {o['symbol']}\n"
+            f"  {o['side'].upper()}  ${o['total_usdt']:.2f}  "
+            f"Slices: {o['slices_done']}  Status: <code>{o['status']}</code>"
+        )
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+# ── Strategy Marketplace ──────────────────────────────────────────────────────
+
+async def market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import json as _json
+    uid  = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+
+    args = context.args or []
+    sub_cmd = args[0].lower() if args else "browse"
+
+    if sub_cmd == "browse" or sub_cmd not in ("publish", "subscribe", "unsubscribe", "leaderboard"):
+        strategies = get_strategies(limit=5, offset=0)
+        if not strategies:
+            await update.effective_message.reply_text(
+                "🏪 <b>Strategy Marketplace</b>\n\nNo published strategies yet.\n"
+                "Use /market publish <name> to share yours!",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        lines = ["🏪 <b>Strategy Marketplace</b>\n"]
+        buttons = []
+        for s in strategies:
+            lines.append(
+                f"  <b>#{s['id']} {s['name']}</b>\n"
+                f"  Symbol: <code>{s['symbol']}</code>  "
+                f"TP: <code>{s['take_profit']}%</code>  SL: <code>{s['stop_loss']}%</code>\n"
+                f"  Subscribers: <code>{s['subscriber_count']}</code>"
+            )
+            buttons.append([InlineKeyboardButton(
+                f"Subscribe to #{s['id']} {s['name']}",
+                callback_data=f"strat_sub_{s['id']}"
+            )])
+        buttons.append([InlineKeyboardButton("🏆 Leaderboard", callback_data="strat_leaderboard")])
+        await update.effective_message.reply_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode=ParseMode.HTML
+        )
+
+    elif sub_cmd == "publish":
+        if len(args) < 2:
+            await update.effective_message.reply_text(
+                "Usage: /market publish <name> [description]\n"
+                "Example: /market publish \"EMA Scalper\" Fast EMA crossover strategy"
+            )
+            return
+        name = args[1]
+        desc = " ".join(args[2:]) if len(args) > 2 else ""
+        s    = get_settings(uid)
+        strat_id = publish_strategy(uid, name, desc, s)
+        write_audit(uid, "strategy_published", {"id": strat_id, "name": name})
+        await update.effective_message.reply_text(
+            f"✅ <b>Strategy Published #{strat_id}</b>\n\n"
+            f"Name: <b>{name}</b>\n"
+            f"Symbol: <code>{s.get('symbol')}</code>  "
+            f"TP: <code>{s.get('take_profit')}%</code>  SL: <code>{s.get('stop_loss')}%</code>\n\n"
+            f"Other users can now subscribe to your strategy!",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif sub_cmd == "subscribe":
+        if len(args) < 2:
+            await update.effective_message.reply_text("Usage: /market subscribe <strategy_id>")
+            return
+        try:
+            strat_id = int(args[1])
+        except ValueError:
+            await update.effective_message.reply_text("Invalid strategy ID.")
+            return
+        strategy = get_strategy(strat_id)
+        if not strategy:
+            await update.effective_message.reply_text("Strategy not found.")
+            return
+        curr = get_settings(uid)
+        prev = _json.dumps({
+            "symbol": curr.get("symbol"), "take_profit": curr.get("take_profit"),
+            "stop_loss": curr.get("stop_loss"), "tp_mode": curr.get("tp_mode"),
+            "sl_mode": curr.get("sl_mode"), "trade_mode": curr.get("trade_mode"),
+        })
+        # Apply strategy settings
+        for k, v in [
+            ("symbol", strategy["symbol"]), ("take_profit", strategy["take_profit"]),
+            ("stop_loss", strategy["stop_loss"]), ("tp_mode", strategy["tp_mode"]),
+            ("sl_mode", strategy["sl_mode"]), ("trade_mode", strategy["trade_mode"]),
+        ]:
+            if v is not None:
+                update_setting(uid, k, v)
+        subscribe_strategy(uid, strat_id, prev)
+        write_audit(uid, "strategy_subscribed", {"strategy_id": strat_id})
+        await update.effective_message.reply_text(
+            f"✅ <b>Subscribed to #{strat_id} {strategy['name']}</b>\n\n"
+            f"Your settings have been updated to match this strategy.\n"
+            f"Use /market unsubscribe to revert to your previous settings.",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif sub_cmd == "unsubscribe":
+        import json as _json
+        prev_json = unsubscribe_strategy(uid)
+        if not prev_json:
+            await update.effective_message.reply_text("You're not subscribed to any strategy.")
+            return
+        try:
+            prev = _json.loads(prev_json)
+            for k, v in prev.items():
+                if v is not None:
+                    update_setting(uid, k, v)
+        except Exception:
+            pass
+        write_audit(uid, "strategy_unsubscribed", {})
+        await update.effective_message.reply_text(
+            "✅ <b>Unsubscribed</b>\n\nYour previous settings have been restored.",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif sub_cmd == "leaderboard":
+        rows = get_strategy_leaderboard(10)
+        if not rows:
+            await update.effective_message.reply_text("No strategies with 30-day data yet.")
+            return
+        lines = ["🏆 <b>Strategy Leaderboard (30d PnL)</b>\n"]
+        for i, row in enumerate(rows, 1):
+            sign = "+" if row["pnl_30d"] >= 0 else ""
+            wr   = (row["wins_30d"] / row["trades_30d"] * 100) if row["trades_30d"] else 0
+            lines.append(
+                f"  <b>{i}. #{row['id']} {row['name']}</b>\n"
+                f"  PnL: <code>{sign}{row['pnl_30d']:.2f}</code>  "
+                f"Trades: <code>{row['trades_30d']}</code>  "
+                f"WR: <code>{wr:.0f}%</code>  "
+                f"Subs: <code>{row['subscriber_count']}</code>"
+            )
+        await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+# ── Audit Log ─────────────────────────────────────────────────────────────────
+
+async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import json as _json
+    uid  = update.effective_user.id
+    if not is_admin(uid) and not has_active_access(uid):
+        await update.effective_message.reply_text("🔒 Subscription required.")
+        return
+    logs = get_audit_log(uid if not is_admin(uid) else None, limit=20)
+    if not logs:
+        await update.effective_message.reply_text("📋 No audit entries yet.")
+        return
+    lines = ["📋 <b>Audit Log</b>\n"]
+    for log in logs:
+        ts = (log.get("created_at") or "")[:16]
+        try:
+            det = _json.loads(log.get("details") or "{}")
+            detail_str = ", ".join(f"{k}={v}" for k, v in list(det.items())[:3])
+        except Exception:
+            detail_str = str(log.get("details", ""))[:60]
+        uid_part = f"uid={log['user_id']}  " if is_admin(uid) else ""
+        lines.append(
+            f"  <code>{ts}</code>  {uid_part}<b>{log['event_type']}</b>\n"
+            f"  <i>{detail_str}</i>"
+        )
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
 BUTTON_MAP.update(_build_button_map())

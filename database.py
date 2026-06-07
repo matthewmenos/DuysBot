@@ -168,6 +168,144 @@ def init_db():
             UNIQUE(user_id, exchange)
         );
 
+
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER,
+            symbol        TEXT,
+            side          TEXT,
+            entry_price   REAL,
+            exit_price    REAL,
+            amount        REAL,
+            pnl           REAL,
+            pnl_pct       REAL,
+            status        TEXT DEFAULT 'open',
+            opened_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+            closed_at     TEXT,
+            close_reason  TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS webhook_logs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER,
+            token      TEXT,
+            payload    TEXT,
+            action     TEXT,
+            symbol     TEXT,
+            status     TEXT,
+            message    TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS dca_plans (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER,
+            exchange_id     TEXT,
+            symbol          TEXT,
+            amount_usdt     REAL,
+            interval_sec    INTEGER,
+            price_ceiling   REAL DEFAULT NULL,
+            status          TEXT DEFAULT 'active',
+            next_run_at     TEXT,
+            total_invested  REAL DEFAULT 0.0,
+            total_bought    REAL DEFAULT 0.0,
+            runs_completed  INTEGER DEFAULT 0,
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS grid_plans (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      INTEGER,
+            exchange_id  TEXT,
+            symbol       TEXT,
+            lower_price  REAL,
+            upper_price  REAL,
+            grid_levels  INTEGER,
+            total_usdt   REAL,
+            grid_spacing REAL,
+            status       TEXT DEFAULT 'active',
+            total_profit REAL DEFAULT 0.0,
+            created_at   TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS grid_orders (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id   INTEGER,
+            order_id  TEXT,
+            side      TEXT,
+            price     REAL,
+            amount    REAL,
+            status    TEXT DEFAULT 'open',
+            filled_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS smart_orders (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER,
+            exchange_id TEXT,
+            type        TEXT,
+            symbol      TEXT,
+            side        TEXT,
+            total_usdt  REAL,
+            params      TEXT,
+            status      TEXT DEFAULT 'active',
+            slices_done INTEGER DEFAULT 0,
+            created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS smart_order_legs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            smart_order_id  INTEGER,
+            order_id        TEXT,
+            side            TEXT,
+            price           REAL,
+            amount          REAL,
+            status          TEXT DEFAULT 'pending',
+            executed_at     TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS strategies (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id          INTEGER,
+            name             TEXT,
+            description      TEXT,
+            symbol           TEXT,
+            multi_symbols    TEXT,
+            take_profit      REAL,
+            stop_loss        REAL,
+            tp_mode          TEXT,
+            sl_mode          TEXT,
+            trailing_stop    INTEGER,
+            trade_mode       TEXT,
+            is_public        INTEGER DEFAULT 1,
+            subscriber_count INTEGER DEFAULT 0,
+            created_at       TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS strategy_subscriptions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            subscriber_id   INTEGER,
+            strategy_id     INTEGER,
+            prev_settings   TEXT,
+            subscribed_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(subscriber_id, strategy_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER,
+            event_type TEXT,
+            details    TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS webdash_tokens (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER,
+            token      TEXT UNIQUE,
+            expires_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS price_alerts (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id      INTEGER,
@@ -204,6 +342,10 @@ def init_db():
             "ALTER TABLE user_settings ADD COLUMN arb_alerts INTEGER DEFAULT 1",
             "ALTER TABLE user_settings ADD COLUMN arb_enabled INTEGER DEFAULT 1",
             "ALTER TABLE user_settings ADD COLUMN arb_symbols TEXT DEFAULT NULL",
+            "ALTER TABLE user_settings ADD COLUMN paper_mode INTEGER DEFAULT 0",
+            "ALTER TABLE user_settings ADD COLUMN paper_balance REAL DEFAULT 1000.0",
+            "ALTER TABLE user_settings ADD COLUMN paper_start_balance REAL DEFAULT 1000.0",
+            "ALTER TABLE users ADD COLUMN webhook_token TEXT",
             """CREATE TABLE IF NOT EXISTS signal_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id           INTEGER NOT NULL,
@@ -350,7 +492,10 @@ _SETTINGS_DEFAULTS = {
     "trade_mode":        "auto",
     "arb_alerts":        1,    # 1 = background arb scan + auto-alerts ON
     "arb_enabled":       1,    # 1 = arbitrage feature enabled for this user
-    "arb_symbols":       None, # JSON list of symbols user wants scanned, None = defaults
+    "arb_symbols":       None, # JSON list of symbols user wants scanned, None = defaults,
+    "paper_mode":        0,     # 1 = paper trading ON
+    "paper_balance":     1000.0,# current paper USDT balance
+    "paper_start_balance":1000.0,# starting paper balance
 }
 
 
@@ -383,13 +528,44 @@ def update_setting(user_id: int, key: str, value):
         "report_hour", "last_report_date",
         "signal_suggestions", "multi_symbols", "trade_mode",
         "arb_alerts", "arb_enabled", "arb_symbols",
+        "paper_mode", "paper_balance", "paper_start_balance",
     }
+    # Keys where auditing every write would be noisy (balances, timestamps)
+    _no_audit = {"paper_balance", "last_report_date", "paper_start_balance"}
     if key not in allowed:
         raise ValueError(f"Unknown setting: {key}")
-    # Ensure row exists before updating
+
+    # ── Financial value guards ─────────────────────────────────────────────────
+    if key == "take_profit":
+        v = float(value)
+        if not (0.01 <= v <= 1000):
+            raise ValueError(f"take_profit must be between 0.01 and 1000, got {v}")
+        value = v
+    elif key == "stop_loss":
+        v = float(value)
+        if not (0.01 <= v <= 100):
+            raise ValueError(f"stop_loss must be between 0.01 and 100, got {v}")
+        value = v
+    elif key == "trade_amount":
+        v = float(value)
+        if not (1.0 <= v <= 1_000_000):
+            raise ValueError(f"trade_amount must be between 1 and 1,000,000, got {v}")
+        value = v
+    elif key == "trailing_stop_pct":
+        v = float(value)
+        if not (0.01 <= v <= 50):
+            raise ValueError(f"trailing_stop_pct must be between 0.01 and 50, got {v}")
+        value = v
     with get_conn() as conn:
         conn.execute("INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", (user_id,))
+        # Capture old value before updating
+        old_row = conn.execute(
+            f"SELECT {key} FROM user_settings WHERE user_id=?", (user_id,)
+        ).fetchone()
+        old_val = old_row[0] if old_row else None
         conn.execute(f"UPDATE user_settings SET {key}=? WHERE user_id=?", (value, user_id))
+    if key not in _no_audit:
+        write_audit(user_id, "setting_change", {"key": key, "old": old_val, "new": value})
 
 
 # ── Trade helpers ─────────────────────────────────────────────────────────────
@@ -400,16 +576,30 @@ def open_trade(user_id, symbol, side, entry_price, amount, exchange, order_id, s
             INSERT INTO trades (user_id, symbol, side, entry_price, amount, exchange, order_id, signal)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (user_id, symbol, side, entry_price, amount, exchange, order_id, signal))
-        return cur.lastrowid
+        trade_id = cur.lastrowid
+    write_audit(user_id, "trade_open", {
+        "trade_id": trade_id, "symbol": symbol, "side": side,
+        "entry_price": entry_price, "amount": amount, "signal": signal
+    })
+    return trade_id
 
 
-def close_trade(trade_id, exit_price, pnl, pnl_pct):
+def close_trade(trade_id, exit_price, pnl, pnl_pct, close_reason="tp"):
     with get_conn() as conn:
+        row = conn.execute("SELECT user_id, symbol, entry_price, amount FROM trades WHERE id=?",
+                           (trade_id,)).fetchone()
         conn.execute("""
             UPDATE trades
-            SET exit_price=?, pnl=?, pnl_pct=?, status='closed', closed_at=CURRENT_TIMESTAMP
+            SET exit_price=?, pnl=?, pnl_pct=?, status='closed',
+                closed_at=CURRENT_TIMESTAMP, close_reason=?
             WHERE id=?
-        """, (exit_price, pnl, pnl_pct, trade_id))
+        """, (exit_price, pnl, pnl_pct, close_reason, trade_id))
+    if row:
+        write_audit(row["user_id"], "trade_close", {
+            "trade_id": trade_id, "symbol": row["symbol"],
+            "entry_price": row["entry_price"], "exit_price": exit_price,
+            "pnl": pnl, "pnl_pct": pnl_pct, "reason": close_reason
+        })
 
 
 def get_open_trades(user_id=None):
@@ -948,6 +1138,45 @@ def has_open_trade_for_symbol(user_id: int, symbol: str) -> bool:
     return row is not None
 
 
+# ── API key submission rate limiting ─────────────────────────────────────────
+# In-memory only; resets on restart (intentional — legitimate users just retry).
+import time as _time
+_api_key_failures: dict = {}   # user_id → [timestamp, ...]
+_MAX_KEY_FAILURES  = 5
+_KEY_FAILURE_WINDOW = 300      # 5 minutes
+_KEY_COOLDOWN_SECS  = 600      # 10 minute lockout after too many failures
+
+
+def record_api_key_failure(user_id: int) -> None:
+    """Record a failed API key validation attempt."""
+    now = _time.time()
+    hits = _api_key_failures.get(user_id, [])
+    hits = [t for t in hits if now - t < _KEY_FAILURE_WINDOW]
+    hits.append(now)
+    _api_key_failures[user_id] = hits
+
+
+def is_api_key_rate_limited(user_id: int) -> tuple[bool, int]:
+    """
+    Return (is_limited, seconds_remaining).
+    Limited if the user has >= _MAX_KEY_FAILURES attempts in _KEY_FAILURE_WINDOW.
+    """
+    now = _time.time()
+    hits = _api_key_failures.get(user_id, [])
+    hits = [t for t in hits if now - t < _KEY_FAILURE_WINDOW]
+    _api_key_failures[user_id] = hits
+    if len(hits) >= _MAX_KEY_FAILURES:
+        oldest = min(hits)
+        remaining = int(_KEY_COOLDOWN_SECS - (now - oldest))
+        return True, max(0, remaining)
+    return False, 0
+
+
+def clear_api_key_failures(user_id: int) -> None:
+    """Clear failure history after a successful key submission."""
+    _api_key_failures.pop(user_id, None)
+
+
 # ── Rate limiting state stored in DB for cross-restart persistence ────────────
 
 def get_user_timezone(user_id: int) -> str:
@@ -1194,6 +1423,12 @@ def get_user_full_profile(user_id: int) -> dict | None:
 
 def set_user_timezone(user_id: int, tz_offset: int):
     """Store UTC offset in hours (-12 to +14)."""
+    try:
+        tz_offset = int(tz_offset)
+    except (TypeError, ValueError):
+        raise ValueError("Timezone offset must be an integer")
+    if not (-12 <= tz_offset <= 14):
+        raise ValueError(f"Timezone offset must be between -12 and +14, got {tz_offset}")
     with get_conn() as conn:
         conn.execute("UPDATE users SET tz_offset=? WHERE user_id=?", (tz_offset, user_id))
 
@@ -1208,3 +1443,446 @@ def get_user_tz_offset(user_id: int) -> int:
         except (TypeError, ValueError):
             return 0
     return 0
+
+
+# ── Paper Trading helpers ─────────────────────────────────────────────────────
+
+def get_paper_balance(user_id: int) -> float:
+    s = get_settings(user_id)
+    return float(s.get("paper_balance", 1000.0))
+
+def update_paper_balance(user_id: int, new_balance: float):
+    update_setting(user_id, "paper_balance", round(new_balance, 6))
+
+def open_paper_trade(user_id: int, symbol: str, side: str, entry_price: float, amount: float) -> int:
+    with get_conn() as conn:
+        cur = conn.execute("""
+            INSERT INTO paper_trades (user_id, symbol, side, entry_price, amount)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, symbol, side, entry_price, amount))
+        return cur.lastrowid
+
+
+def open_paper_trade_atomic(user_id: int, symbol: str, side: str,
+                             entry_price: float, amount: float) -> int:
+    """
+    Open a paper trade and deduct the amount from paper balance in a single
+    transaction so a crash between the two operations cannot leave the
+    balance inconsistent.
+    Returns the new trade_id, or raises if balance is insufficient.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT paper_balance FROM user_settings WHERE user_id=?", (user_id,)
+        ).fetchone()
+        balance = float(row["paper_balance"]) if row and row["paper_balance"] is not None else 1000.0
+        if balance < amount:
+            raise ValueError(f"Insufficient paper balance: {balance:.2f} < {amount:.2f}")
+        cur = conn.execute("""
+            INSERT INTO paper_trades (user_id, symbol, side, entry_price, amount)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, symbol, side, entry_price, amount))
+        trade_id = cur.lastrowid
+        new_balance = round(balance - amount, 6)
+        conn.execute(
+            "UPDATE user_settings SET paper_balance=? WHERE user_id=?",
+            (new_balance, user_id)
+        )
+        return trade_id
+
+def close_paper_trade(trade_id: int, exit_price: float, pnl: float, pnl_pct: float, reason: str = "tp"):
+    with get_conn() as conn:
+        conn.execute("""
+            UPDATE paper_trades
+            SET exit_price=?, pnl=?, pnl_pct=?, status='closed',
+                closed_at=CURRENT_TIMESTAMP, close_reason=?
+            WHERE id=?
+        """, (exit_price, pnl, pnl_pct, reason, trade_id))
+
+def get_open_paper_trades(user_id: int) -> list:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM paper_trades WHERE user_id=? AND status='open'", (user_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+def get_paper_trade_history(user_id: int, limit: int = 20) -> list:
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM paper_trades WHERE user_id=? ORDER BY opened_at DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+def get_paper_stats(user_id: int) -> dict:
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                   SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
+                   COALESCE(SUM(pnl), 0) as total_pnl,
+                   COALESCE(MAX(pnl_pct), 0) as best_pct,
+                   COALESCE(MIN(pnl_pct), 0) as worst_pct
+            FROM paper_trades WHERE user_id=? AND status='closed'
+        """, (user_id,)).fetchone()
+    return dict(row) if row else {}
+
+
+# ── Webhook helpers ───────────────────────────────────────────────────────────
+
+def generate_webhook_token(user_id: int) -> str:
+    import secrets
+    token = secrets.token_urlsafe(32)
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET webhook_token=? WHERE user_id=?", (token, user_id))
+    return token
+
+def get_user_by_webhook_token(token: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM users WHERE webhook_token=?", (token,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["api_key"]    = _dec(d.get("api_key", ""))
+    d["api_secret"] = _dec(d.get("api_secret", ""))
+    d["api_pass"]   = _dec(d.get("api_pass", ""))
+    return d
+
+def get_webhook_token(user_id: int) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT webhook_token FROM users WHERE user_id=?", (user_id,)).fetchone()
+    return row["webhook_token"] if row else None
+
+def log_webhook(user_id: int, token: str, payload: str, action: str,
+                symbol: str, status: str, message: str = ""):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO webhook_logs (user_id, token, payload, action, symbol, status, message)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, token, payload, action, symbol, status, message))
+
+def get_webhook_logs(user_id: int, limit: int = 10) -> list:
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM webhook_logs WHERE user_id=? ORDER BY created_at DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── DCA helpers ───────────────────────────────────────────────────────────────
+
+def create_dca_plan(user_id: int, exchange_id: str, symbol: str,
+                    amount_usdt: float, interval_sec: int,
+                    price_ceiling: float = None) -> int:
+    from datetime import datetime, timedelta
+    next_run = (datetime.utcnow() + timedelta(seconds=interval_sec)).isoformat()
+    with get_conn() as conn:
+        cur = conn.execute("""
+            INSERT INTO dca_plans
+                (user_id, exchange_id, symbol, amount_usdt, interval_sec, price_ceiling, next_run_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, exchange_id, symbol, amount_usdt, interval_sec, price_ceiling, next_run))
+        return cur.lastrowid
+
+def get_dca_plans(user_id: int) -> list:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM dca_plans WHERE user_id=? ORDER BY created_at DESC", (user_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+def get_due_dca_plans() -> list:
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT d.*, u.api_key, u.api_secret, u.api_pass
+            FROM dca_plans d JOIN users u ON d.user_id = u.user_id
+            WHERE d.status='active' AND d.next_run_at <= ?
+        """, (now,)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["api_key"]    = _dec(d.get("api_key", ""))
+        d["api_secret"] = _dec(d.get("api_secret", ""))
+        d["api_pass"]   = _dec(d.get("api_pass", ""))
+        result.append(d)
+    return result
+
+def update_dca_after_run(plan_id: int, amount_usdt: float, qty_bought: float):
+    from datetime import datetime
+    with get_conn() as conn:
+        row = conn.execute("SELECT interval_sec, runs_completed FROM dca_plans WHERE id=?", (plan_id,)).fetchone()
+        if not row:
+            return
+        next_run = (datetime.utcnow() + timedelta(seconds=row["interval_sec"])).isoformat()
+        conn.execute("""
+            UPDATE dca_plans
+            SET next_run_at=?, total_invested=total_invested+?,
+                total_bought=total_bought+?, runs_completed=runs_completed+1
+            WHERE id=?
+        """, (next_run, amount_usdt, qty_bought, plan_id))
+
+def set_dca_status(plan_id: int, status: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE dca_plans SET status=? WHERE id=?", (status, plan_id))
+
+def get_dca_plan(plan_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM dca_plans WHERE id=?", (plan_id,)).fetchone()
+    return dict(row) if row else None
+
+def get_dca_stats(plan_id: int) -> dict:
+    plan = get_dca_plan(plan_id)
+    if not plan:
+        return {}
+    total_invested = plan["total_invested"]
+    total_bought   = plan["total_bought"]
+    avg_price = total_invested / total_bought if total_bought > 0 else 0.0
+    return {
+        "plan":          plan,
+        "avg_price":     round(avg_price, 6),
+        "total_invested":round(total_invested, 4),
+        "total_bought":  round(total_bought, 8),
+        "runs":          plan["runs_completed"],
+    }
+
+
+# ── Grid Trading helpers ───────────────────────────────────────────────────────
+
+def create_grid_plan(user_id: int, exchange_id: str, symbol: str,
+                     lower: float, upper: float, levels: int,
+                     total_usdt: float) -> int:
+    spacing = (upper - lower) / (levels - 1) if levels > 1 else 0
+    with get_conn() as conn:
+        cur = conn.execute("""
+            INSERT INTO grid_plans
+                (user_id, exchange_id, symbol, lower_price, upper_price,
+                 grid_levels, total_usdt, grid_spacing)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, exchange_id, symbol, lower, upper, levels, total_usdt, spacing))
+        return cur.lastrowid
+
+def get_active_grids(user_id: int = None) -> list:
+    with get_conn() as conn:
+        if user_id:
+            rows = conn.execute(
+                "SELECT * FROM grid_plans WHERE status='active' AND user_id=?", (user_id,)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM grid_plans WHERE status='active'").fetchall()
+    return [dict(r) for r in rows]
+
+def get_grid_plan(plan_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM grid_plans WHERE id=?", (plan_id,)).fetchone()
+    return dict(row) if row else None
+
+def set_grid_status(plan_id: int, status: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE grid_plans SET status=? WHERE id=?", (status, plan_id))
+
+def add_grid_order(plan_id: int, order_id: str, side: str, price: float, amount: float):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO grid_orders (plan_id, order_id, side, price, amount)
+            VALUES (?, ?, ?, ?, ?)
+        """, (plan_id, order_id, side, price, amount))
+
+def get_grid_orders(plan_id: int) -> list:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM grid_orders WHERE plan_id=?", (plan_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+def update_grid_order_status(grid_order_id: int, status: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE grid_orders SET status=?, filled_at=CURRENT_TIMESTAMP WHERE id=?",
+            (status, grid_order_id)
+        )
+
+def update_grid_profit(plan_id: int, profit_delta: float):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE grid_plans SET total_profit=total_profit+? WHERE id=?",
+            (profit_delta, plan_id)
+        )
+
+
+# ── Strategy Marketplace helpers ──────────────────────────────────────────────
+
+def publish_strategy(user_id: int, name: str, description: str, settings: dict) -> int:
+    with get_conn() as conn:
+        # Replace any existing strategy for this user
+        conn.execute("DELETE FROM strategies WHERE user_id=?", (user_id,))
+        cur = conn.execute("""
+            INSERT INTO strategies
+                (user_id, name, description, symbol, multi_symbols,
+                 take_profit, stop_loss, tp_mode, sl_mode, trailing_stop, trade_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id, name, description,
+            settings.get("symbol", "BTC/USDT"),
+            settings.get("multi_symbols"),
+            settings.get("take_profit", 2.0),
+            settings.get("stop_loss", 1.0),
+            settings.get("tp_mode", "pct"),
+            settings.get("sl_mode", "pct"),
+            settings.get("trailing_stop", 0),
+            settings.get("trade_mode", "auto"),
+        ))
+        return cur.lastrowid
+
+def get_strategies(limit: int = 20, offset: int = 0) -> list:
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT s.*, u.username FROM strategies s
+            JOIN users u ON s.user_id = u.user_id
+            WHERE s.is_public=1
+            ORDER BY s.subscriber_count DESC, s.created_at DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset)).fetchall()
+    return [dict(r) for r in rows]
+
+def get_strategy(strategy_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM strategies WHERE id=?", (strategy_id,)).fetchone()
+    return dict(row) if row else None
+
+def subscribe_strategy(subscriber_id: int, strategy_id: int, prev_settings: str):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO strategy_subscriptions
+                (subscriber_id, strategy_id, prev_settings)
+            VALUES (?, ?, ?)
+        """, (subscriber_id, strategy_id, prev_settings))
+        conn.execute(
+            "UPDATE strategies SET subscriber_count=subscriber_count+1 WHERE id=?",
+            (strategy_id,)
+        )
+
+def unsubscribe_strategy(subscriber_id: int) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT prev_settings, strategy_id FROM strategy_subscriptions WHERE subscriber_id=?
+        """, (subscriber_id,)).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE strategies SET subscriber_count=MAX(0,subscriber_count-1) WHERE id=?",
+                (row["strategy_id"],)
+            )
+            conn.execute(
+                "DELETE FROM strategy_subscriptions WHERE subscriber_id=?", (subscriber_id,)
+            )
+            return row["prev_settings"]
+    return None
+
+def get_user_strategy_sub(user_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT ss.*, s.name FROM strategy_subscriptions ss
+            JOIN strategies s ON ss.strategy_id = s.id
+            WHERE ss.subscriber_id=?
+        """, (user_id,)).fetchone()
+    return dict(row) if row else None
+
+def get_strategy_leaderboard(limit: int = 10) -> list:
+    """Return top strategies by 30-day PnL of the strategy author."""
+    since = (datetime.utcnow() - timedelta(days=30)).isoformat()
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT s.id, s.name, s.subscriber_count, s.user_id,
+                   COALESCE(SUM(t.pnl), 0) as pnl_30d,
+                   COUNT(t.id) as trades_30d,
+                   SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END) as wins_30d
+            FROM strategies s
+            LEFT JOIN trades t ON t.user_id = s.user_id
+                AND t.status='closed' AND t.closed_at >= ?
+            WHERE s.is_public=1
+            GROUP BY s.id
+            ORDER BY pnl_30d DESC
+            LIMIT ?
+        """, (since, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Audit Log helpers ─────────────────────────────────────────────────────────
+
+def write_audit(user_id: int, event_type: str, details: dict):
+    """Append-only audit entry. Never raises to caller."""
+    try:
+        with get_conn() as conn:
+            conn.execute("""
+                INSERT INTO audit_log (user_id, event_type, details)
+                VALUES (?, ?, ?)
+            """, (user_id, event_type, json.dumps(details, default=str)))
+    except Exception as e:
+        import logging as _log
+        _log.getLogger(__name__).warning(f"[AUDIT] write failed: {e}")
+
+def get_audit_log(user_id: int = None, limit: int = 20) -> list:
+    with get_conn() as conn:
+        if user_id:
+            rows = conn.execute("""
+                SELECT * FROM audit_log WHERE user_id=?
+                ORDER BY created_at DESC LIMIT ?
+            """, (user_id, limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Web Dashboard token helpers ───────────────────────────────────────────────
+
+def create_webdash_token(user_id: int) -> str:
+    import secrets
+    from datetime import datetime, timedelta
+    token   = secrets.token_urlsafe(24)
+    expires = (datetime.utcnow() + timedelta(hours=24)).isoformat()
+    with get_conn() as conn:
+        conn.execute("DELETE FROM webdash_tokens WHERE user_id=?", (user_id,))
+        conn.execute("""
+            INSERT INTO webdash_tokens (user_id, token, expires_at)
+            VALUES (?, ?, ?)
+        """, (user_id, token, expires))
+    return token
+
+def get_webdash_token_user(token: str) -> dict | None:
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT wt.user_id, wt.expires_at FROM webdash_tokens wt
+            WHERE wt.token=? AND wt.expires_at > ?
+        """, (token, now)).fetchone()
+    return dict(row) if row else None
+
+
+# ── Analytics helpers ─────────────────────────────────────────────────────────
+
+def get_analytics_data(user_id: int, days: int = 30) -> list:
+    """Return closed trades for analytics period."""
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM trades
+            WHERE user_id=? AND status='closed' AND closed_at >= ?
+            ORDER BY closed_at ASC
+        """, (user_id, since)).fetchall()
+    return [dict(r) for r in rows]
+
+def get_full_trade_history(user_id: int, days: int = 0) -> list:
+    with get_conn() as conn:
+        if days > 0:
+            since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+            rows = conn.execute("""
+                SELECT * FROM trades WHERE user_id=? AND status='closed' AND closed_at >= ?
+                ORDER BY closed_at ASC
+            """, (user_id, since)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM trades WHERE user_id=? AND status='closed'
+                ORDER BY closed_at ASC
+            """, (user_id,)).fetchall()
+    return [dict(r) for r in rows]

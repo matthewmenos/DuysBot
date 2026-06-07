@@ -4,19 +4,39 @@ Users get a unique referral link. When a referred user subscribes,
 the referrer earns a free month of access.
 """
 
-import hashlib
+import secrets
 import logging
 from database import get_conn, activate_subscription, get_user, upsert_user
 
 logger = logging.getLogger(__name__)
 
-REFERRAL_REWARD_MONTHS = 1  # months given to referrer on successful referral
+from config import REFERRAL_REWARD_MONTHS
+
+
+def _get_or_create_referral_code(user_id: int) -> str:
+    """
+    Return the user's referral code from the DB, generating and storing
+    a cryptographically random one on first call.
+    Stored in the referral_codes table (created lazily).
+    """
+    _ensure_referral_tables()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT code FROM referral_codes WHERE user_id=?", (user_id,)
+        ).fetchone()
+        if row:
+            return row["code"]
+        code = secrets.token_urlsafe(8).upper()[:10]
+        conn.execute(
+            "INSERT OR IGNORE INTO referral_codes (user_id, code) VALUES (?, ?)",
+            (user_id, code)
+        )
+        return code
 
 
 def generate_referral_code(user_id: int) -> str:
-    """Generate a deterministic referral code from user_id."""
-    raw = f"duys_{user_id}_trading"
-    return hashlib.md5(raw.encode()).hexdigest()[:8].upper()
+    """Return the user's persistent random referral code."""
+    return _get_or_create_referral_code(user_id)
 
 
 def get_referral_link(user_id: int, bot_username: str) -> str:
@@ -34,6 +54,11 @@ def _ensure_referral_tables():
             code         TEXT NOT NULL,
             rewarded     INTEGER DEFAULT 0,
             created_at   TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS referral_codes (
+            user_id  INTEGER PRIMARY KEY,
+            code     TEXT NOT NULL UNIQUE,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """)
 
@@ -83,7 +108,7 @@ def get_referral_stats(user_id: int) -> dict:
             "SELECT COUNT(*) as c FROM referrals WHERE referrer_id=? AND rewarded=1", (user_id,)
         ).fetchone()["c"]
         return {
-            "code":     generate_referral_code(user_id),
+            "code":     _get_or_create_referral_code(user_id),
             "total":    total,
             "rewarded": rewarded,
             "pending":  total - rewarded,
@@ -92,18 +117,15 @@ def get_referral_stats(user_id: int) -> dict:
 
 def resolve_start_referral(start_param: str) -> int | None:
     """
-    Parse /start ref_XXXXXXXX and return the referrer's user_id.
+    Parse /start ref_XXXXXXXXXX and return the referrer's user_id.
     Returns None if not a valid referral code.
     """
     if not start_param or not start_param.startswith("ref_"):
         return None
     code = start_param[4:].upper()
     _ensure_referral_tables()
-    # Find the user whose MD5-based code matches
     with get_conn() as conn:
-        rows = conn.execute("SELECT user_id FROM users").fetchall()
-    for row in rows:
-        uid = row["user_id"]
-        if generate_referral_code(uid) == code:
-            return uid
-    return None
+        row = conn.execute(
+            "SELECT user_id FROM referral_codes WHERE code=?", (code,)
+        ).fetchone()
+    return row["user_id"] if row else None

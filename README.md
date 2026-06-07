@@ -38,9 +38,9 @@ Keys are stored **encrypted** (Fernet AES-256) in the database. Messages contain
 | 💳 Paystack | Card, mobile money, bank transfer — auto-activates via webhook |
 | 🪙 USDT Crypto | Aptos, TRON (TRC-20), BSC (BEP-20) — verified on-chain |
 | 🔑 Admin Grant | Lifetime access granted by admin |
-| 🔗 Referral | Refer users, earn 1 free month per successful subscription |
+| 🔗 Referral | Refer users, earn free months per successful subscription (configurable) |
 
-Plans: **1 month $12** · **3 months $34** · **6 months $65**
+Plans are **fully configurable via env vars** — no code changes needed (`PLAN_PRICE_1M`, `PLAN_PRICE_3M`, `PLAN_PRICE_6M`). Defaults: **1 month $12** · **3 months $34** · **6 months $65**
 
 ---
 
@@ -223,7 +223,7 @@ All run automatically inside the bot process:
 
 | Task | Interval | Description |
 |---|---|---|
-| Auto-trade loop | 60s | Scans signals, manages TP/SL, trailing stop |
+| Auto-trade loop | 60s | Scans signals, manages TP/SL, trailing stop; enforces circuit breaker |
 | Price alert check | 60s | Fires alerts when targets are hit |
 | Signal suggestions | 5 min | Scans 12 top pairs, notifies on ≥70% confidence |
 | Daily PnL report | Daily 8 AM | Sends wins/losses/PnL summary to each user |
@@ -325,45 +325,69 @@ Get a free SSL cert: `sudo certbot --nginx -d yourdomain.com`
 | Area | Implementation |
 |---|---|
 | API key storage | Fernet AES-256 encrypted in SQLite |
+| DB backups | Encrypted with the same Fernet key — never stored plaintext |
 | API key entry | Messages deleted from chat immediately after input |
 | Paystack webhooks | HMAC-SHA512 signature verified on every event |
+| TradingView webhooks | Per-user HMAC tokens; symbol/amount/exchange validated on every call |
 | Trade scope | Spot only — no leverage, no margin |
 | Per-user keys | No shared credentials between users |
 | Access gate | Expired subscriptions lose trading access immediately |
+| Error messages | Raw exception strings never shown to users |
+| Trade logs | Order IDs and exact amounts omitted from `trades.log` |
+| Circuit breaker | Auto-halts trading after configurable daily loss % (`MAX_DAILY_LOSS_PCT`) |
+| Race conditions | Per-(user, symbol) async lock prevents duplicate orders |
+| Referral codes | Cryptographically random (`secrets.token_urlsafe`), not enumerable |
+| TLS | Startup warning if `BEHIND_TLS_PROXY` is not set |
 | Error reporting | All errors forwarded to admin Telegram IDs in real time |
 
 ---
 
 ## Environment Variables Reference
 
-```env
-# Telegram
-BOT_TOKEN=                    # From @BotFather
-ADMIN_IDS=123,456             # Comma-separated admin Telegram IDs
-SUPPORT_CHANNEL_ID=           # Private channel for support messages (bot must be admin)
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `ENCRYPTION_KEY` | **Yes** | — | Fernet AES-256 key. Generate once and back up securely. Bot refuses to start without it. |
+| `TV_WEBHOOK_SECRET_SALT` | Recommended | random/session | Salt for TradingView webhook tokens. If unset, tokens reset on every restart. |
+| `BEHIND_TLS_PROXY` | Recommended | — | Set to `1` when nginx/Caddy TLS is in place. Suppresses HTTP security warning. |
+| `BOT_TOKEN` | **Yes** | — | Telegram bot token from @BotFather. |
+| `ADMIN_IDS` | **Yes** | — | Comma-separated Telegram user IDs with admin access. |
+| `SUPPORT_CHANNEL_ID` | No | — | Private channel/group for support messages (bot must be admin). |
+| `PAYSTACK_SECRET_KEY` | Yes* | — | `sk_live_...` or `sk_test_...` from Paystack dashboard. |
+| `PAYSTACK_PUBLIC_KEY` | Yes* | — | `pk_live_...` or `pk_test_...` from Paystack dashboard. |
+| `PAYSTACK_WEBHOOK_SECRET` | Yes* | — | Webhook signing secret from Paystack dashboard. |
+| `BOT_WEBHOOK_URL` | Yes* | — | Public HTTPS URL of your server (e.g. `https://yourdomain.com`). |
+| `WEBHOOK_PORT` | No | `8080` | Port for Paystack webhook HTTP server. TradingView uses `WEBHOOK_PORT + 1`. |
+| `PLAN_PRICE_1M` | No | `12.00` | 1-month subscription price (USD). |
+| `PLAN_PRICE_3M` | No | `34.00` | 3-month subscription price (USD). |
+| `PLAN_PRICE_6M` | No | `65.00` | 6-month subscription price (USD). |
+| `FREE_TRIAL_DAYS` | No | `7` | Free trial length in days (once per account). |
+| `REFERRAL_REWARD_MONTHS` | No | `1` | Free months given to referrer per successful conversion. |
+| `MAX_DAILY_LOSS_PCT` | No | `5.0` | Circuit breaker: halt trading when daily loss exceeds this %. Set `0` to disable. |
+| `USDT_APTOS_ADDRESS` | No | — | Your Aptos wallet for USDT (LayerZero) payments. |
+| `USDT_TRON_ADDRESS` | No | — | Your TRON wallet for USDT TRC-20 payments. |
+| `USDT_BSC_ADDRESS` | No | — | Your BSC wallet for USDT BEP-20 payments. |
+| `TRONGRID_API_KEY` | No | — | TronGrid API key for TRON payment verification (free at trongrid.io). |
+| `BSCSCAN_API_KEY` | No | — | BscScan API key for BSC payment verification (free at bscscan.com/apis). |
+| `ARB_MIN_PROFIT_PCT` | No | `0.3` | Minimum net arb profit % (after all fees) to flag an opportunity. |
+| `ARB_WITHDRAWAL_FEE_USDT` | No | `1.5` | Flat cross-exchange withdrawal cost assumed per leg (USDT). |
+| `ARB_FEE_BINANCE` | No | `0.001` | Binance taker fee fraction (override if your tier differs). |
+| `ARB_FEE_BYBIT` | No | `0.001` | Bybit taker fee fraction. |
+| `ARB_FEE_OKX` | No | `0.001` | OKX taker fee fraction. |
+| `ARB_FEE_MEXC` | No | `0.002` | MEXC taker fee fraction. |
+| `ARB_FEE_KUCOIN` | No | `0.001` | KuCoin taker fee fraction. |
+| `ARB_FEE_COINBASE` | No | `0.006` | Coinbase Advanced taker fee fraction. |
+| `ARB_FEE_BINGX` | No | `0.001` | BingX taker fee fraction. |
+| `ARB_FEE_GATEIO` | No | `0.002` | Gate.io taker fee fraction. |
+| `ARB_FEE_DEFAULT` | No | `0.001` | Default taker fee for unlisted exchanges. |
+| `MAX_DCA_PLANS` | No | `3` | Max simultaneous DCA plans per user. |
+| `MAX_GRID_PLANS` | No | `2` | Max simultaneous grid trading plans per user. |
+| `MAX_SMART_ORDERS` | No | `5` | Max active smart orders (TWAP/Iceberg/OCO) per user. |
+| `CORRELATION_THRESHOLD` | No | `0.85` | Block co-holding pairs with correlation above this value (0–1). |
+| `CRYPTOCOMPARE_API_KEY` | No | — | News sentiment scoring (cryptocompare.com, free tier). |
+| `COINMARKETCAP_API_KEY` | No | — | CMC rank and market cap signals (coinmarketcap.com/api, free). |
+| `NEWSAPI_KEY` | No | — | General crypto headlines (newsapi.org, free tier). |
+| `DB_PATH` | No | `bot_data.db` | SQLite database file path. |
+| `PERSISTENCE_FILE` | No | `bot_persistence.pickle` | PTB PicklePersistence file for wizard state and cooldowns. |
+| `PAPER_DEFAULT_BALANCE` | No | `1000.0` | Starting paper-trading balance for new users (USDT). |
 
-# Security
-ENCRYPTION_KEY=               # Fernet key — generate once and back up securely
-
-# Paystack
-PAYSTACK_SECRET_KEY=          # sk_live_... or sk_test_...
-PAYSTACK_PUBLIC_KEY=          # pk_live_... or pk_test_...
-PAYSTACK_WEBHOOK_SECRET=      # From Paystack dashboard
-BOT_WEBHOOK_URL=              # https://yourdomain.com
-WEBHOOK_PORT=8080
-
-# Crypto Wallets (leave blank to disable that network)
-USDT_APTOS_ADDRESS=           # Aptos wallet address
-USDT_TRON_ADDRESS=            # TRON wallet address (TRC-20)
-USDT_BSC_ADDRESS=             # BSC wallet address (BEP-20)
-TRONGRID_API_KEY=             # trongrid.io (free)
-BSCSCAN_API_KEY=              # bscscan.com/apis (free)
-
-# Signal APIs (all optional — bot degrades gracefully)
-CRYPTOCOMPARE_API_KEY=        # cryptocompare.com (free tier)
-COINMARKETCAP_API_KEY=        # coinmarketcap.com/api (free basic plan)
-NEWSAPI_KEY=                  # newsapi.org (free tier)
-
-# Database
-DB_PATH=bot_data.db
-```
+*Required only if accepting Paystack payments.

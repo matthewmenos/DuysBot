@@ -15,7 +15,7 @@ from database import (
     get_user
 )
 from exchange import get_exchange, fetch_ticker
-from utils import require_granted
+from utils import require_granted, PENDING_INPUT
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,6 @@ async def setalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
 
     if len(args) < 3:
-        from utils import PENDING_INPUT
         uid2 = update.effective_user.id
         PENDING_INPUT[uid2] = {"field": "alert_symbol"}
         await update.effective_message.reply_text(

@@ -203,3 +203,134 @@ def get_min_trade_amount(exchange: ccxt.Exchange, symbol: str) -> float:
     except Exception as e:
         logger.warning(f"get_min_trade_amount error ({symbol}): {e}")
         return 0.0
+
+
+# ── Paper order simulation ────────────────────────────────────────────────────
+
+def place_paper_order(symbol: str, side: str, amount_usdt: float, current_price: float) -> dict:
+    """Simulate a market order without hitting the exchange."""
+    import time, uuid
+    qty = amount_usdt / current_price if current_price > 0 else 0
+    return {
+        "id":        str(uuid.uuid4())[:8],
+        "symbol":    symbol,
+        "side":      side,
+        "type":      "market",
+        "price":     current_price,
+        "amount":    qty,
+        "filled":    qty,
+        "cost":      amount_usdt,
+        "status":    "closed",
+        "timestamp": int(time.time() * 1000),
+        "paper":     True,
+    }
+
+
+# ── Limit order helpers ───────────────────────────────────────────────────────
+
+def place_limit_order(exchange: ccxt.Exchange, symbol: str, side: str,
+                      amount: float, price: float) -> dict:
+    """Place a limit order. amount is in base currency units."""
+    try:
+        qty = exchange.amount_to_precision(symbol, amount)
+        pr  = exchange.price_to_precision(symbol, price)
+        if side == "buy":
+            return exchange.create_limit_buy_order(symbol, float(qty), float(pr))
+        return exchange.create_limit_sell_order(symbol, float(qty), float(pr))
+    except Exception as e:
+        logger.error(f"place_limit_order error {symbol} {side}: {e}", exc_info=True)
+        raise
+
+
+def cancel_order(exchange: ccxt.Exchange, symbol: str, order_id: str) -> dict:
+    try:
+        return exchange.cancel_order(order_id, symbol)
+    except Exception as e:
+        logger.warning(f"cancel_order {order_id}: {e}")
+        raise
+
+
+# ── Rate-limit-aware ExchangeQueue ────────────────────────────────────────────
+
+import asyncio
+import functools
+from typing import Callable, Any
+
+class ExchangeQueue:
+    """
+    Wraps a ccxt Exchange to add automatic retry on RateLimitExceeded
+    with exponential backoff.  NetworkError retries up to 3 times.
+    ExchangeError is raised immediately (no retry).
+
+    Usage:
+        queue = ExchangeQueue(exchange)
+        result = await queue.call(exchange.fetch_ticker, "BTC/USDT")
+    """
+
+    MAX_RATE_RETRIES    = 5
+    MAX_NETWORK_RETRIES = 3
+    BASE_DELAY          = 1.0
+    MAX_DELAY           = 60.0
+    WARN_AFTER_FAILURES = 5
+
+    def __init__(self, exchange: ccxt.Exchange):
+        self.exchange             = exchange
+        self._consecutive_failures = 0
+
+    @property
+    def consecutive_failures(self) -> int:
+        return self._consecutive_failures
+
+    def reset_failures(self):
+        self._consecutive_failures = 0
+
+    async def call(self, fn: Callable, *args, **kwargs) -> Any:
+        rate_attempts    = 0
+        network_attempts = 0
+
+        while True:
+            try:
+                loop   = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None, functools.partial(fn, *args, **kwargs)
+                )
+                self.reset_failures()
+                return result
+
+            except ccxt.RateLimitExceeded:
+                rate_attempts += 1
+                if rate_attempts > self.MAX_RATE_RETRIES:
+                    self._consecutive_failures += 1
+                    raise
+                delay = min(self.BASE_DELAY * (2 ** rate_attempts), self.MAX_DELAY)
+                logger.warning(
+                    f"[QUEUE] {self.exchange.id} rate-limited; retry {rate_attempts} "
+                    f"in {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
+
+            except ccxt.NetworkError:
+                network_attempts += 1
+                if network_attempts > self.MAX_NETWORK_RETRIES:
+                    self._consecutive_failures += 1
+                    raise
+                await asyncio.sleep(2.0 * network_attempts)
+
+            except ccxt.ExchangeError:
+                self._consecutive_failures += 1
+                raise
+
+            except Exception:
+                self._consecutive_failures += 1
+                raise
+
+
+# Module-level queue registry: (user_id, exchange_id) → ExchangeQueue
+_queues: dict[tuple, ExchangeQueue] = {}
+
+def get_exchange_queue(user_id: int, exchange: ccxt.Exchange) -> ExchangeQueue:
+    """Return (or create) the ExchangeQueue for this user+exchange."""
+    key = (user_id, exchange.id)
+    if key not in _queues:
+        _queues[key] = ExchangeQueue(exchange)
+    return _queues[key]

@@ -12,6 +12,7 @@ import json
 import logging
 import time
 import asyncio
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta
 from telegram.ext import ContextTypes
 
@@ -23,7 +24,7 @@ from database import (
     get_pending_confirmation, resolve_trade_confirmation,
     create_trade_confirmation, get_all_subscribed_users,
     get_users_expiring_soon, has_open_trade_for_symbol,
-    log_signal_to_db, get_platform_stats,
+    log_signal_to_db, get_platform_stats, write_audit,
 )
 from exchange import get_exchange, fetch_ohlcv, fetch_ticker, place_market_order
 from strategy import generate_signal
@@ -31,7 +32,7 @@ from arbitrage import run_arbitrage_scan
 from logger_setup import (
     log_signal, log_trade_open, log_trade_close, report_error_to_admin
 )
-from config import ADMIN_IDS, MEXC_KEY_EXPIRY_DAYS
+from config import ADMIN_IDS, MEXC_KEY_EXPIRY_DAYS, MAX_DAILY_LOSS_PCT
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,18 @@ _recently_suggested: dict = {}
 
 # ── Pending confirmations: {confirm_id: (user_id, expiry_ts)} ─────────────────
 _pending_confirms: dict = {}
+
+# ── Per-(user_id, symbol) locks to prevent duplicate order placement ──────────
+_order_locks: dict = {}
+_order_locks_meta: asyncio.Lock = asyncio.Lock()
+
+async def _get_order_lock(user_id: int, symbol: str) -> asyncio.Lock:
+    """Return a per-(user, symbol) lock, creating it if necessary."""
+    key = (user_id, symbol)
+    async with _order_locks_meta:
+        if key not in _order_locks:
+            _order_locks[key] = asyncio.Lock()
+        return _order_locks[key]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -138,6 +151,37 @@ async def start_scheduler(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Arbitrage scan error: {e}")
 
+    # 11. DCA orders (every tick)
+    try:
+        await run_dca_orders(context)
+    except Exception as e:
+        logger.error(f"DCA error: {e}")
+        await report_error_to_admin(context, e, "run_dca_orders")
+
+    # 12. Grid monitor (every tick)
+    try:
+        await run_grid_monitor(context)
+    except Exception as e:
+        logger.error(f"Grid error: {e}")
+
+    # 13. Smart orders (every tick)
+    try:
+        await run_smart_orders(context)
+    except Exception as e:
+        logger.error(f"Smart orders error: {e}")
+
+    # 14. Paper trade TP/SL monitor (every tick)
+    try:
+        await run_paper_monitor(context)
+    except Exception as e:
+        logger.error(f"Paper monitor error: {e}")
+
+    # 15. TradingView webhook queue drain (every tick)
+    try:
+        await drain_tv_queue(context)
+    except Exception as e:
+        logger.error(f"TV queue error: {e}")
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 1. Auto-trading loop
@@ -167,12 +211,16 @@ async def process_user(context, user):
     if not symbols:
         symbols = [settings.get("symbol", "BTC/USDT")]
 
+    # Divide trade_amount across all symbols so total exposure stays bounded.
+    # e.g. $30 trade_amount with 3 symbols → $10 per symbol.
+    per_symbol_amt = trade_amt / len(symbols)
+
     for symbol in symbols:
         try:
             await _process_symbol(
                 context, user_id, exchange, user["exchange"],
                 symbol, tp_pct, sl_pct, tp_price, sl_price,
-                trade_amt, trailing, trail_pct, confirm, trade_mode
+                per_symbol_amt, trailing, trail_pct, confirm, trade_mode
             )
         except Exception as e:
             logger.error(f"Symbol {symbol} error for user {user_id}: {e}")
@@ -210,10 +258,13 @@ async def _process_symbol(context, user_id, exchange, exchange_id, symbol,
             hit_sl = pnl_pct <= -effective_sl
 
         if hit_tp or hit_sl:
-            pnl_usdt = trade["amount"] * pnl_pct
-            reason   = "Take Profit" if hit_tp else ("Trailing Stop" if trailing else "Stop Loss")
-            close_trade(trade["id"], current_price, round(pnl_usdt, 4), round(pnl_pct * 100, 2))
-            log_trade_close(user_id, symbol, reason, entry, current_price, pnl_usdt, pnl_pct * 100)
+            _amount   = Decimal(str(trade["amount"]))
+            _pnl_pct  = Decimal(str(pnl_pct))
+            pnl_usdt  = float((_amount * _pnl_pct).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+            pnl_pct_r = float((_pnl_pct * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+            reason    = "Take Profit" if hit_tp else ("Trailing Stop" if trailing else "Stop Loss")
+            close_trade(trade["id"], current_price, pnl_usdt, pnl_pct_r)
+            log_trade_close(user_id, symbol, reason, entry, current_price, pnl_usdt, pnl_pct_r)
 
             emoji = "✅" if hit_tp else "🛑"
             await context.bot.send_message(
@@ -223,7 +274,7 @@ async def _process_symbol(context, user_id, exchange, exchange_id, symbol,
                     f"Symbol:  <code>{symbol}</code>\n"
                     f"Entry:   <code>${entry:,.6f}</code>\n"
                     f"Exit:    <code>${current_price:,.6f}</code>\n"
-                    f"PnL:     <code>{'+'if pnl_usdt>=0 else ''}{pnl_usdt:.4f} USDT ({pnl_pct*100:+.2f}%)</code>"
+                    f"PnL:     <code>{'+'if pnl_usdt>=0 else ''}{pnl_usdt:.4f} USDT ({pnl_pct_r:+.2f}%)</code>"
                 ),
                 parse_mode="HTML"
             )
@@ -243,6 +294,38 @@ async def _process_symbol(context, user_id, exchange, exchange_id, symbol,
         return
 
     if signal["action"] == "BUY" and signal["confidence"] >= 50:
+        # Circuit breaker: halt new buys if daily loss exceeds MAX_DAILY_LOSS_PCT
+        if MAX_DAILY_LOSS_PCT > 0:
+            try:
+                daily = get_daily_pnl(user_id)
+                daily_pnl = daily.get("total_pnl", 0) or 0
+                from exchange import fetch_usdt_balance
+                try:
+                    bal_for_cb = fetch_usdt_balance(exchange)
+                    if bal_for_cb > 0 and daily_pnl < 0:
+                        daily_loss_pct = abs(daily_pnl) / bal_for_cb * 100
+                        if daily_loss_pct >= MAX_DAILY_LOSS_PCT:
+                            logger.warning(
+                                f"[CIRCUIT BREAKER] uid={user_id} daily loss {daily_loss_pct:.2f}% "
+                                f">= {MAX_DAILY_LOSS_PCT}% — halting new trades"
+                            )
+                            await context.bot.send_message(
+                                chat_id=user_id,
+                                text=(
+                                    f"🚨 <b>Circuit Breaker Triggered</b>\n\n"
+                                    f"Your daily loss has reached <code>{daily_loss_pct:.2f}%</code> "
+                                    f"(limit: <code>{MAX_DAILY_LOSS_PCT}%</code>).\n\n"
+                                    f"No new trades will be opened today to protect your capital.\n"
+                                    f"Existing positions are still monitored for TP/SL."
+                                ),
+                                parse_mode="HTML"
+                            )
+                            return
+                except Exception:
+                    pass
+            except Exception as _cb_e:
+                logger.debug(f"[CB] Circuit breaker check failed (non-fatal): {_cb_e}")
+
         # Check balance before ordering
         from exchange import fetch_usdt_balance
         try:
@@ -263,21 +346,123 @@ async def _process_symbol(context, user_id, exchange, exchange_id, symbol,
         except Exception as e:
             logger.warning(f"Balance check failed for {user_id}: {e}")
 
-        # Deduplication: block if we already have an open trade on this symbol
-        if has_open_trade_for_symbol(user_id, symbol):
-            logger.info(f"Skipping buy — already have open trade on {symbol} for user {user_id}")
+        # Deduplication: hold the per-(user, symbol) lock for the entire
+        # check → place sequence so concurrent scheduler ticks cannot both pass.
+        _sym_lock = await _get_order_lock(user_id, symbol)
+        if _sym_lock.locked():
+            logger.info(f"Skipping buy — order already in progress for {symbol} uid={user_id}")
             return
 
-        if confirm:
-            await _request_trade_confirmation(
-                context, user_id, symbol, "buy", current_price, trade_amt, signal, exchange_id
-            )
-        else:
-            await _execute_buy(context, user_id, exchange, exchange_id, symbol, current_price, trade_amt, signal)
+        async with _sym_lock:
+            if has_open_trade_for_symbol(user_id, symbol):
+                logger.info(f"Skipping buy — already have open trade on {symbol} for user {user_id}")
+                return
+
+            # TP/SL sanity check: for a buy, TP price must be above entry and SL below entry
+            if tp_pct is not None and sl_pct is not None:
+                if tp_pct <= 0:
+                    logger.warning(f"[TPSL] uid={user_id} TP pct={tp_pct*100:.2f}% is not positive — skipping")
+                    return
+                if sl_pct <= 0:
+                    logger.warning(f"[TPSL] uid={user_id} SL pct={sl_pct*100:.2f}% is not positive — skipping")
+                    return
+            if tp_price is not None and sl_price is not None and current_price:
+                tp_ok = tp_price > current_price
+                sl_ok = sl_price < current_price
+                if not tp_ok or not sl_ok:
+                    logger.warning(
+                        f"[TPSL] uid={user_id} invalid TP/SL for BUY: "
+                        f"entry={current_price} TP={tp_price} SL={sl_price}"
+                    )
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            f"⚠️ <b>Invalid TP/SL Configuration</b>\n\n"
+                            f"For a BUY on <code>{symbol}</code>:\n"
+                            f"  Take Profit must be above entry price\n"
+                            f"  Stop Loss must be below entry price\n\n"
+                            f"Please fix your settings via /settings."
+                        ),
+                        parse_mode="HTML"
+                    )
+                    return
+
+            # Correlation filter: skip if too correlated with an existing open position
+            try:
+                from correlation import is_too_correlated
+                from config import CORRELATION_THRESHOLD
+                open_t = [dict(t) for t in get_open_trades(user_id)]
+                held   = list({t["symbol"] for t in open_t if t["symbol"] != symbol})
+                if held:
+                    too_corr, corr_sym, corr_val = await asyncio.to_thread(
+                        is_too_correlated, exchange, symbol, held,
+                        CORRELATION_THRESHOLD, context.bot_data
+                    )
+                    if too_corr:
+                        logger.info(
+                            f"[CORR] Skipping {symbol} uid={user_id} — "
+                            f"{corr_val:.0%} correlated with {corr_sym}"
+                        )
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=f"⚠️ Skipped BUY <code>{symbol}</code> — "
+                                 f"{corr_val*100:.0f}% correlated with your open "
+                                 f"<code>{corr_sym}</code> position.",
+                            parse_mode="HTML"
+                        )
+                        return
+            except Exception as _corr_e:
+                logger.debug(f"[CORR] check failed (non-fatal): {_corr_e}")
+
+            if confirm:
+                await _request_trade_confirmation(
+                    context, user_id, symbol, "buy", current_price, trade_amt, signal, exchange_id
+                )
+            else:
+                await _execute_buy(context, user_id, exchange, exchange_id, symbol, current_price, trade_amt, signal)
 
 
 async def _execute_buy(context, user_id, exchange, exchange_id, symbol, price, amount, signal):
     try:
+        s          = get_settings(user_id)
+        is_paper   = bool(s.get("paper_mode", 0))
+
+        if is_paper:
+            from exchange import place_paper_order
+            from database import (open_paper_trade_atomic, get_paper_balance)
+            bal = get_paper_balance(user_id)
+            if bal < amount:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"⚠️ Paper balance insufficient (<code>${bal:.2f}</code>).",
+                    parse_mode="HTML"
+                )
+                return
+            order    = place_paper_order(symbol, "buy", amount, price)
+            order_id = order["id"]
+            try:
+                open_paper_trade_atomic(user_id, symbol, "buy", price, amount)
+            except ValueError as _ve:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"⚠️ Paper trade failed: {_ve}",
+                    parse_mode="HTML"
+                )
+                return
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    f"🧪 <b>PAPER BUY Executed</b>\n\n"
+                    f"Symbol:      <code>{symbol}</code>\n"
+                    f"Price:       <code>${price:,.6f}</code>\n"
+                    f"Amount:      <code>{amount} USDT</code>\n"
+                    f"Paper Bal:   <code>${bal-amount:.2f}</code>\n"
+                    f"Confidence:  <code>{signal['confidence']}%</code>"
+                ),
+                parse_mode="HTML"
+            )
+            return
+
         order    = place_market_order(exchange, symbol, "buy", amount)
         order_id = str(order.get("id", "N/A"))
         open_trade(user_id, symbol, "buy", price, amount, exchange_id, order_id, signal["reason"])
@@ -298,7 +483,11 @@ async def _execute_buy(context, user_id, exchange, exchange_id, symbol, price, a
         logger.error(f"Buy failed user={user_id} symbol={symbol}: {e}")
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"⚠️ <b>Order failed</b> for {symbol}:\n<code>{str(e)[:200]}</code>",
+            text=(
+                f"⚠️ <b>Order failed</b> for <code>{symbol}</code>\n\n"
+                f"The exchange returned an error. Please check your API key permissions, "
+                f"available balance, and minimum order size. Contact support if the issue persists."
+            ),
             parse_mode="HTML"
         )
         await report_error_to_admin(context, e, f"buy_order uid={user_id} {symbol}")
@@ -957,3 +1146,389 @@ async def _run_arb_for_user(context: ContextTypes.DEFAULT_TYPE, user_id: int) ->
             seen.pop(_arb_fp_cross(o), None)
         for o in new_tri:
             seen.pop(_arb_fp_tri(o), None)
+
+
+
+# ── TV Webhook queue ──────────────────────────────────────────────────────────
+_tv_trade_queue: asyncio.Queue = asyncio.Queue()
+
+async def drain_tv_queue(context):
+    """Process all pending TradingView webhook-triggered trades."""
+    while not _tv_trade_queue.empty():
+        try:
+            job = _tv_trade_queue.get_nowait()
+        except Exception:
+            break
+        try:
+            await _execute_tv_trade(context, job)
+        except Exception as e:
+            logger.error(f"[TV] Execute error uid={job.get('user_id')}: {e}", exc_info=True)
+            await report_error_to_admin(context, e, f"tv_trade uid={job.get('user_id')}")
+
+async def _execute_tv_trade(context, job: dict):
+    from database import log_webhook, write_audit
+    user_id  = job["user_id"]
+    action   = job["action"]
+    symbol   = job["symbol"]
+    amount   = job.get("amount", 0)
+    exchange = job["exchange_obj"]
+    token    = job["token"]
+
+    try:
+        if action == "buy":
+            order = await asyncio.to_thread(
+                __import__("exchange").place_market_order, exchange, symbol, "buy", amount
+            )
+            log_webhook(user_id, token, str(job), action, symbol, "executed",
+                        f"order {order.get('id')}")
+            write_audit(user_id, "webhook_trigger",
+                        {"action": action, "symbol": symbol, "order_id": order.get("id")})
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"⚡ <b>TradingView BUY executed</b>\n"
+                     f"Symbol: <code>{symbol}</code>\n"
+                     f"Amount: <code>${amount:.2f}</code>\n"
+                     f"Order: <code>{order.get('id')}</code>",
+                parse_mode="HTML"
+            )
+        elif action in ("sell", "close"):
+            from database import get_open_trades, close_trade
+            open_t = [dict(t) for t in get_open_trades(user_id) if dict(t)["symbol"] == symbol]
+            for t in open_t:
+                ticker = await asyncio.to_thread(
+                    __import__("exchange").fetch_ticker, exchange, symbol
+                )
+                price   = ticker["last"]
+                qty     = t["amount"] / t["entry_price"]
+                await asyncio.to_thread(exchange.create_market_sell_order, symbol, qty)
+                pnl_pct = (price - t["entry_price"]) / t["entry_price"]
+                pnl     = t["amount"] * pnl_pct
+                close_trade(t["id"], price, pnl, pnl_pct * 100)
+                write_audit(user_id, "webhook_trigger",
+                            {"action": "sell", "symbol": symbol, "trade_id": t["id"]})
+            log_webhook(user_id, token, str(job), action, symbol, "executed",
+                        f"closed {len(open_t)} trade(s)")
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"⚡ <b>TradingView SELL executed</b> — closed {len(open_t)} position(s) on <code>{symbol}</code>",
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        log_webhook(user_id, token, str(job), action, symbol, "error", str(e))
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"❌ <b>TradingView webhook error</b>\n\n"
+                f"Action <code>{action.upper()}</code> on <code>{symbol}</code> failed. "
+                f"Check your exchange connection and balance."
+            ),
+            parse_mode="HTML"
+        )
+        raise
+
+
+# ── DCA orders ────────────────────────────────────────────────────────────────
+
+async def run_dca_orders(context):
+    from database import get_due_dca_plans, update_dca_after_run, set_dca_status, write_audit
+    from exchange import get_exchange, place_market_order
+
+    plans = await asyncio.to_thread(get_due_dca_plans)
+    for plan in plans:
+        user_id = plan["user_id"]
+        try:
+            exch = get_exchange(
+                plan["exchange_id"],
+                plan["api_key"], plan["api_secret"], plan.get("api_pass", "")
+            )
+            # Check price ceiling
+            if plan["price_ceiling"]:
+                ticker = await asyncio.to_thread(fetch_ticker, exch, plan["symbol"])
+                if ticker["last"] > plan["price_ceiling"]:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=f"🔄 <b>DCA Skipped</b> — {plan['symbol']} is above your price ceiling "
+                             f"(${plan['price_ceiling']:.2f}). Will retry next interval.",
+                        parse_mode="HTML"
+                    )
+                    await asyncio.to_thread(
+                        update_dca_after_run, plan["id"], 0.0, 0.0
+                    )
+                    continue
+
+            order = await asyncio.to_thread(
+                place_market_order, exch, plan["symbol"], "buy", plan["amount_usdt"]
+            )
+            qty = float(order.get("filled") or order.get("amount") or 0)
+            await asyncio.to_thread(
+                update_dca_after_run, plan["id"], plan["amount_usdt"], qty
+            )
+            write_audit(user_id, "dca_buy", {
+                "symbol": plan["symbol"], "amount": plan["amount_usdt"],
+                "qty": qty, "order_id": order.get("id"), "run": plan["runs_completed"] + 1
+            })
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"🔄 <b>DCA Buy Executed</b>\n"
+                     f"Symbol: <code>{plan['symbol']}</code>\n"
+                     f"Amount: <code>${plan['amount_usdt']:.2f}</code>\n"
+                     f"Qty: <code>{qty:.6f}</code>\n"
+                     f"Run #{plan['runs_completed'] + 1}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"[DCA] Plan {plan['id']} uid={user_id}: {e}", exc_info=True)
+            await report_error_to_admin(context, e, f"dca_plan {plan['id']}")
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    f"⚠️ <b>DCA Error</b> — <code>{plan['symbol']}</code>\n\n"
+                    f"The scheduled buy could not be placed. Check your exchange connection "
+                    f"and balance, then use /dca to review your plan."
+                ),
+                parse_mode="HTML"
+            )
+
+
+# ── Grid monitor ──────────────────────────────────────────────────────────────
+
+async def run_grid_monitor(context):
+    from database import (get_active_grids, get_grid_orders, update_grid_order_status,
+                           add_grid_order, update_grid_profit, get_exchange_creds, write_audit)
+    from exchange import get_exchange, place_limit_order
+
+    grids = await asyncio.to_thread(get_active_grids)
+    for grid in grids:
+        user_id = grid["user_id"]
+        try:
+            creds = await asyncio.to_thread(get_exchange_creds, user_id, grid["exchange_id"])
+            if not creds:
+                continue
+            exch   = get_exchange(grid["exchange_id"], creds["api_key"],
+                                  creds["api_secret"], creds.get("api_pass", ""))
+            orders = await asyncio.to_thread(get_grid_orders, grid["id"])
+            spacing   = grid["grid_spacing"]
+            usdt_per  = grid["total_usdt"] / grid["grid_levels"]
+
+            for go in orders:
+                if go["status"] != "open":
+                    continue
+                try:
+                    fetched = await asyncio.to_thread(exch.fetch_order, go["order_id"], grid["symbol"])
+                    if fetched["status"] in ("closed", "filled"):
+                        await asyncio.to_thread(update_grid_order_status, go["id"], "filled")
+                        fill_price = float(fetched.get("average") or fetched.get("price") or go["price"])
+                        # Place counter-order one level away
+                        if go["side"] == "buy":
+                            counter_price = fill_price + spacing
+                            counter_side  = "sell"
+                            profit_delta  = 0.0
+                        else:
+                            counter_price = fill_price - spacing
+                            counter_side  = "buy"
+                            profit_delta  = spacing * go["amount"]
+                            await asyncio.to_thread(update_grid_profit, grid["id"], profit_delta)
+
+                        qty    = usdt_per / counter_price if counter_side == "buy" else go["amount"]
+                        new_o  = await asyncio.to_thread(
+                            place_limit_order, exch, grid["symbol"], counter_side, qty, counter_price
+                        )
+                        await asyncio.to_thread(
+                            add_grid_order, grid["id"], new_o["id"], counter_side, counter_price, qty
+                        )
+                        write_audit(user_id, "grid_fill", {
+                            "plan_id": grid["id"], "filled_side": go["side"],
+                            "fill_price": fill_price, "counter_order": new_o.get("id")
+                        })
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=f"🔲 <b>Grid Fill</b> — {grid['symbol']}\n"
+                                 f"  {go['side'].upper()} filled @ <code>${fill_price:.4f}</code>\n"
+                                 f"  Placed {counter_side.upper()} @ <code>${counter_price:.4f}</code>",
+                            parse_mode="HTML"
+                        )
+                except Exception as e:
+                    logger.debug(f"[GRID] order check {go['order_id']}: {e}")
+
+        except Exception as e:
+            logger.error(f"[GRID] plan {grid['id']} uid={user_id}: {e}", exc_info=True)
+
+
+# ── Smart orders monitor ──────────────────────────────────────────────────────
+
+async def run_smart_orders(context):
+    from smart_orders import (
+        get_active_smart_orders, twap_slice_due, twap_completed,
+        execute_twap_slice, update_smart_order_status, get_smart_order,
+        check_iceberg_fill, place_iceberg_chunk, iceberg_remaining,
+        get_iceberg_visible_amount, check_oco_fills, cancel_all_smart_order_legs,
+        get_smart_order_legs,
+    )
+    from database import get_exchange_creds, write_audit
+    from exchange import get_exchange
+    import json as _json
+
+    orders = await asyncio.to_thread(get_active_smart_orders)
+    for order in orders:
+        uid  = order["user_id"]
+        otype = order["type"]
+        try:
+            creds = await asyncio.to_thread(get_exchange_creds, uid, order["exchange_id"])
+            if not creds:
+                continue
+            exch   = get_exchange(order["exchange_id"], creds["api_key"],
+                                  creds["api_secret"], creds.get("api_pass", ""))
+            params = _json.loads(order["params"])
+
+            if otype == "twap":
+                if twap_completed(order):
+                    update_smart_order_status(order["id"], "completed")
+                    await context.bot.send_message(
+                        chat_id=uid, parse_mode="HTML",
+                        text=f"✅ <b>TWAP Completed</b> — {order['symbol']} "
+                             f"({order['slices_done']}/{params['slices']} slices)"
+                    )
+                    continue
+                if twap_slice_due(order):
+                    slice_usdt = order["total_usdt"] / params["slices"]
+                    o = await asyncio.to_thread(
+                        execute_twap_slice, exch, order["symbol"], order["side"], slice_usdt
+                    )
+                    new_done = order["slices_done"] + 1
+                    update_smart_order_status(order["id"], "active", new_done)
+                    write_audit(uid, "twap_slice", {
+                        "order_id": order["id"], "slice": new_done,
+                        "ccxt_id": o.get("id")
+                    })
+                    await context.bot.send_message(
+                        chat_id=uid, parse_mode="HTML",
+                        text=f"⏱ <b>TWAP Slice {new_done}/{params['slices']}</b> — "
+                             f"{order['side'].upper()} <code>{order['symbol']}</code> "
+                             f"${slice_usdt:.2f}"
+                    )
+
+            elif otype == "iceberg":
+                legs = get_smart_order_legs(order["id"])
+                open_legs = [l for l in legs if l["status"] == "open"]
+                if not open_legs:
+                    remaining = iceberg_remaining(order)
+                    if remaining < 1.0:
+                        update_smart_order_status(order["id"], "completed")
+                        await context.bot.send_message(
+                            chat_id=uid, parse_mode="HTML",
+                            text=f"✅ <b>Iceberg Completed</b> — {order['symbol']}"
+                        )
+                        continue
+                    ticker = await asyncio.to_thread(fetch_ticker, exch, order["symbol"])
+                    price  = ticker["last"]
+                    chunk  = min(get_iceberg_visible_amount(order), remaining)
+                    new_o  = await asyncio.to_thread(
+                        place_iceberg_chunk, exch, order["symbol"], order["side"], chunk, price
+                    )
+                    from smart_orders import add_smart_order_leg
+                    add_smart_order_leg(order["id"], new_o["id"], order["side"], price,
+                                        chunk / price, "open")
+                    new_done = order["slices_done"] + 1
+                    update_smart_order_status(order["id"], "active", new_done)
+                else:
+                    for leg in open_legs:
+                        filled = await asyncio.to_thread(
+                            check_iceberg_fill, exch, order["symbol"], leg["order_id"]
+                        )
+                        if filled:
+                            from smart_orders import update_leg_status
+                            update_leg_status(leg["id"], "filled")
+                            write_audit(uid, "iceberg_fill", {"order_id": leg["order_id"]})
+
+            elif otype == "oco":
+                result = await asyncio.to_thread(
+                    check_oco_fills, exch, order["symbol"], order["id"]
+                )
+                if result:
+                    update_smart_order_status(order["id"], "completed")
+                    write_audit(uid, "oco_filled", {"leg": result, "symbol": order["symbol"]})
+                    await context.bot.send_message(
+                        chat_id=uid, parse_mode="HTML",
+                        text=f"✅ <b>OCO {result.upper()} hit</b> — {order['symbol']}\n"
+                             f"The {'take-profit' if result == 'tp' else 'stop-loss'} "
+                             f"leg was filled and the other order cancelled."
+                    )
+
+        except Exception as e:
+            logger.error(f"[SMART] order {order['id']} uid={uid}: {e}", exc_info=True)
+
+
+# ── Paper trade TP/SL monitor ─────────────────────────────────────────────────
+
+async def run_paper_monitor(context):
+    from database import (get_settings, close_paper_trade, update_paper_balance,
+                           get_paper_balance, write_audit)
+
+    with __import__("database").get_conn() as conn:
+        rows = conn.execute("""
+            SELECT pt.*, s.take_profit, s.stop_loss, s.tp_mode, s.sl_mode
+            FROM paper_trades pt
+            JOIN user_settings s ON pt.user_id = s.user_id
+            WHERE pt.status='open'
+        """).fetchall()
+
+    for row in rows:
+        t = dict(row)
+        uid  = t["user_id"]
+        s    = get_settings(uid)
+        if not s.get("paper_mode"):
+            continue
+        try:
+            exch_id = __import__("database").get_user(uid)
+            if not exch_id or not exch_id.get("exchange"):
+                continue
+            creds = await asyncio.to_thread(
+                __import__("database").get_exchange_creds, uid, exch_id["exchange"]
+            )
+            if not creds:
+                continue
+            from exchange import get_exchange, fetch_ticker
+            exch   = get_exchange(exch_id["exchange"], creds["api_key"],
+                                  creds["api_secret"], creds.get("api_pass", ""))
+            ticker = await asyncio.to_thread(fetch_ticker, exch, t["symbol"])
+            price  = ticker["last"]
+            entry  = t["entry_price"]
+            tp_val = t["take_profit"]
+            sl_val = t["stop_loss"]
+            tp_mode = t.get("tp_mode", "pct")
+            sl_mode = t.get("sl_mode", "pct")
+
+            tp_price = entry * (1 + tp_val / 100) if tp_mode == "pct" else tp_val
+            sl_price = entry * (1 - sl_val / 100) if sl_mode == "pct" else sl_val
+
+            reason = None
+            exit_p = price
+            if price >= tp_price:
+                reason, exit_p = "tp", tp_price
+            elif price <= sl_price:
+                reason, exit_p = "sl", sl_price
+
+            if reason:
+                pnl_pct  = (exit_p - entry) / entry
+                qty      = t["amount"] / entry
+                pnl_usdt = qty * (exit_p - entry)
+                await asyncio.to_thread(close_paper_trade, t["id"], exit_p,
+                                        pnl_usdt, pnl_pct * 100, reason)
+                new_bal = get_paper_balance(uid) + pnl_usdt
+                await asyncio.to_thread(update_paper_balance, uid, new_bal)
+                write_audit(uid, "paper_trade_close", {
+                    "symbol": t["symbol"], "reason": reason,
+                    "entry": entry, "exit": exit_p, "pnl": pnl_usdt
+                })
+                icon = "✅" if reason == "tp" else "🛑"
+                await context.bot.send_message(
+                    chat_id=uid, parse_mode="HTML",
+                    text=f"{icon} <b>Paper Trade Closed</b> — {t['symbol']}\n"
+                         f"  Reason: <code>{'Take Profit' if reason == 'tp' else 'Stop Loss'}</code>\n"
+                         f"  Entry:  <code>${entry:.4f}</code>\n"
+                         f"  Exit:   <code>${exit_p:.4f}</code>\n"
+                         f"  PnL:    <code>${pnl_usdt:+.4f} ({pnl_pct*100:+.2f}%)</code>\n"
+                         f"  Balance: <code>${new_bal:.2f}</code>"
+                )
+        except Exception as e:
+            logger.debug(f"[PAPER] trade {t['id']}: {e}")

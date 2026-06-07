@@ -17,16 +17,31 @@ from handlers import (
     positions, export_trades, signals_history,
     bot_status, user_lookup, timezone_cmd,
     arbitrage_cmd,
+    # New feature handlers
+    paper_cmd, paper_reset_cmd, paper_stats_cmd,
+    backtest_cmd, analytics_cmd, webdash_cmd,
+    webhook_cmd, webhook_new_cmd, webhook_log_cmd,
+    dca_cmd, dca_stats_cmd,
+    grid_cmd, grid_status_cmd, grid_stop_cmd,
+    twap_cmd, iceberg_cmd, oco_cmd, smart_orders_cmd,
+    market_cmd, audit_cmd,
 )
 from alerts_handlers import setalert, myalerts, delalert
 from scheduler import start_scheduler
+from persistence import build_persistence, restore_in_memory_state, sync_to_bot_data
 
 from logger_setup import setup_logging, init_error_reporter
 logger = setup_logging()
 
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    persistence = build_persistence()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .persistence(persistence)
+        .build()
+    )
 
     # Command handlers
     app.add_handler(CommandHandler("balance", balance))
@@ -62,7 +77,27 @@ def main():
     app.add_handler(CommandHandler("setalert", setalert))
     app.add_handler(CommandHandler("myalerts", myalerts))
     app.add_handler(CommandHandler("delalert", delalert))
-    app.add_handler(CommandHandler("arbitrage", arbitrage_cmd))
+    app.add_handler(CommandHandler("arbitrage",    arbitrage_cmd))
+    app.add_handler(CommandHandler("paper",        paper_cmd))
+    app.add_handler(CommandHandler("paper_reset",  paper_reset_cmd))
+    app.add_handler(CommandHandler("paper_stats",  paper_stats_cmd))
+    app.add_handler(CommandHandler("analytics",    analytics_cmd))
+    app.add_handler(CommandHandler("backtest",     backtest_cmd))
+    app.add_handler(CommandHandler("webdash",      webdash_cmd))
+    app.add_handler(CommandHandler("webhook",      webhook_cmd))
+    app.add_handler(CommandHandler("webhook_new",  webhook_new_cmd))
+    app.add_handler(CommandHandler("webhook_log",  webhook_log_cmd))
+    app.add_handler(CommandHandler("dca",          dca_cmd))
+    app.add_handler(CommandHandler("dca_stats",    dca_stats_cmd))
+    app.add_handler(CommandHandler("grid",         grid_cmd))
+    app.add_handler(CommandHandler("grid_status",  grid_status_cmd))
+    app.add_handler(CommandHandler("grid_stop",    grid_stop_cmd))
+    app.add_handler(CommandHandler("twap",         twap_cmd))
+    app.add_handler(CommandHandler("iceberg",      iceberg_cmd))
+    app.add_handler(CommandHandler("oco",          oco_cmd))
+    app.add_handler(CommandHandler("smart_orders", smart_orders_cmd))
+    app.add_handler(CommandHandler("market",       market_cmd))
+    app.add_handler(CommandHandler("audit",        audit_cmd))
 
     from telegram import BotCommand
 
@@ -86,16 +121,44 @@ def main():
         BotCommand("subscribe",   "💳 Subscribe / manage plan"),
         BotCommand("mystatus",    "👤 Your subscription status"),
         BotCommand("referral",    "🎁 Referral programme"),
-        BotCommand("support",     "🆘 Contact support"),
-        BotCommand("help",        "❓ Help & command list"),
+        BotCommand("paper",        "🧪 Paper trading (simulated)"),
+        BotCommand("paper_stats",  "🧪 Paper trading performance"),
+        BotCommand("analytics",    "📊 Full performance analytics"),
+        BotCommand("backtest",     "📈 Backtest signal strategy"),
+        BotCommand("webdash",      "🌐 Web dashboard link"),
+        BotCommand("webhook",      "📡 TradingView webhook URL"),
+        BotCommand("webhook_new",  "📡 Regenerate webhook token"),
+        BotCommand("webhook_log",  "📡 Webhook activity log"),
+        BotCommand("dca",          "🔄 Dollar-cost averaging plans"),
+        BotCommand("grid",         "🔲 Grid trading plans"),
+        BotCommand("twap",         "⏱ TWAP order"),
+        BotCommand("iceberg",      "🧊 Iceberg order"),
+        BotCommand("oco",          "🎯 OCO order"),
+        BotCommand("smart_orders", "⚙️ View smart orders"),
+        BotCommand("market",       "🏪 Strategy marketplace"),
+        BotCommand("audit",        "📋 Audit log"),
+        BotCommand("support",      "🆘 Contact support"),
+        BotCommand("help",         "❓ Help & command list"),
     ]
 
     async def _post_init(application):
-        """Runs once after the bot is fully initialised — safe place to call API methods."""
+        """
+        Runs once after the bot is fully initialised and persistence has been loaded.
+        1. Re-populate in-memory dicts from persisted bot_data (restart safety).
+        2. Register the Telegram command menu.
+        """
+        restore_in_memory_state(application.bot_data)
         await application.bot.set_my_commands(BOT_COMMANDS)
         logger.info("Telegram command menu registered.")
 
     app.post_init = _post_init
+
+    async def _sync_state(context):
+        """Flush live scheduler dicts back into bot_data every 2 min so
+        PicklePersistence can write them to disk on its 30-second cycle."""
+        sync_to_bot_data(context.application.bot_data)
+
+    app.job_queue.run_repeating(_sync_state, interval=120, first=30)
 
     # Callback and message handlers
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -105,11 +168,21 @@ def main():
     app.job_queue.run_repeating(start_scheduler, interval=60, first=10)
 
     # Start Paystack webhook server in background
-    from webhook_server import run_webhook_server
+    from webhook_server import run_webhook_server, run_tv_webhook_server, TVWebhookHandler
+    from web_app import run_web_app
     from threading import Thread
+
     Thread(target=run_webhook_server, daemon=True).start()
 
-    # The web app is not started here to avoid running both the bot and website at the same time.
+    # TradingView webhook server (Paystack port + 1)
+    tv_thread = Thread(target=run_tv_webhook_server, daemon=True)
+    tv_thread.start()
+
+    # Web dashboard (port 5000)
+    Thread(target=run_web_app, daemon=True).start()
+
+    # Wire bot app reference so TV handler can enqueue trades
+    TVWebhookHandler.bot_app = app
 
     # Initialise error reporter so scheduler can DM admins on errors
     from config import ADMIN_IDS as _ADMIN_IDS

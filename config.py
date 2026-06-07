@@ -10,7 +10,13 @@ load_dotenv()
 
 # ── Security ─────────────────────────────────────────────────────────────────
 # Generate once: python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")  # Leave blank to skip encryption (not recommended)
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
+if not ENCRYPTION_KEY:
+    raise RuntimeError(
+        "ENCRYPTION_KEY is not set. Generate one with:\n"
+        "  python3 -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"\n"
+        "Then add it to your .env file as ENCRYPTION_KEY=<value>"
+    )
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 BOT_TOKEN          = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
@@ -50,9 +56,21 @@ MEXC_KEY_EXPIRY_DAYS = 90
 PAYSTACK_SECRET_KEY     = os.getenv("PAYSTACK_SECRET_KEY", "")
 PAYSTACK_PUBLIC_KEY     = os.getenv("PAYSTACK_PUBLIC_KEY", "")
 PAYSTACK_WEBHOOK_SECRET = os.getenv("PAYSTACK_WEBHOOK_SECRET", "")
-SUBSCRIPTION_PRICE_USD  = 12.00
 WEBHOOK_PORT            = int(os.getenv("WEBHOOK_PORT", "8080"))
 BOT_WEBHOOK_URL         = os.getenv("BOT_WEBHOOK_URL", "")
+
+# ── Subscription Pricing (USD) ────────────────────────────────────────────────
+# Prices shown to users and charged via Paystack / USDT crypto payments.
+# Changing these takes effect immediately — no code change required.
+PLAN_PRICE_1M  = float(os.getenv("PLAN_PRICE_1M",  "12.00"))   # 1-month plan
+PLAN_PRICE_3M  = float(os.getenv("PLAN_PRICE_3M",  "34.00"))   # 3-month plan
+PLAN_PRICE_6M  = float(os.getenv("PLAN_PRICE_6M",  "65.00"))   # 6-month plan
+
+# Keep a dict form for easy lookups (months → price)
+PLAN_PRICES: dict = {1: PLAN_PRICE_1M, 3: PLAN_PRICE_3M, 6: PLAN_PRICE_6M}
+
+# Backward-compat alias used by paystack.py
+SUBSCRIPTION_PRICE_USD = PLAN_PRICE_1M
 
 # ── Crypto Payment — USDT wallet addresses per network ────────────────────────
 # Set each address to YOUR wallet on that network.
@@ -98,7 +116,11 @@ CRYPTO_NETWORKS = {
 }
 
 # ── Free Trial ────────────────────────────────────────────────────────────────
-FREE_TRIAL_DAYS = 7  # once per account lifetime
+FREE_TRIAL_DAYS = int(os.getenv("FREE_TRIAL_DAYS", "7"))  # once per account lifetime
+
+# ── Referral Rewards ──────────────────────────────────────────────────────────
+# Months of free access awarded to the referrer when a referred user subscribes.
+REFERRAL_REWARD_MONTHS = int(os.getenv("REFERRAL_REWARD_MONTHS", "1"))
 
 # ── Signal & News APIs ────────────────────────────────────────────────────────
 CRYPTOCOMPARE_API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY", "")
@@ -121,7 +143,48 @@ POPULAR_SYMBOLS = [
 ]
 
 # ── Database ──────────────────────────────────────────────────────────────────
-DB_PATH = os.getenv("DB_PATH", "bot_data.db")
+DB_PATH          = os.getenv("DB_PATH",          "bot_data.db")
+PERSISTENCE_FILE = os.getenv("PERSISTENCE_FILE", "bot_persistence.pickle")
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
 TRADE_LOOP_INTERVAL = 60
+
+# ── Feature flags & limits ────────────────────────────────────────────────────
+MAX_DCA_PLANS         = int(os.getenv("MAX_DCA_PLANS",         "3"))
+MAX_GRID_PLANS        = int(os.getenv("MAX_GRID_PLANS",        "2"))
+MAX_SMART_ORDERS      = int(os.getenv("MAX_SMART_ORDERS",      "5"))
+CORRELATION_THRESHOLD = float(os.getenv("CORRELATION_THRESHOLD","0.85"))
+TV_WEBHOOK_SECRET_SALT = os.getenv("TV_WEBHOOK_SECRET_SALT", "")
+if not TV_WEBHOOK_SECRET_SALT:
+    import secrets as _secrets
+    TV_WEBHOOK_SECRET_SALT = _secrets.token_hex(32)
+    import warnings
+    warnings.warn(
+        "TV_WEBHOOK_SECRET_SALT is not set — using a random value for this session. "
+        "Set TV_WEBHOOK_SECRET_SALT in your .env to make webhook tokens persistent across restarts.",
+        stacklevel=2,
+    )
+
+# ── Arbitrage Engine ─────────────────────────────────────────────────────────
+# Minimum net profit % after ALL fees to flag an arb opportunity.
+ARB_MIN_PROFIT_PCT           = float(os.getenv("ARB_MIN_PROFIT_PCT",            "0.3"))
+# Flat cost (USDT) assumed per cross-exchange withdrawal/transfer.
+ARB_WITHDRAWAL_FEE_USDT      = float(os.getenv("ARB_WITHDRAWAL_FEE_USDT",       "1.5"))
+# Per-exchange taker fees (fraction). Override individually as needed.
+ARB_FEE_BINANCE  = float(os.getenv("ARB_FEE_BINANCE",  "0.001"))
+ARB_FEE_BYBIT    = float(os.getenv("ARB_FEE_BYBIT",    "0.001"))
+ARB_FEE_OKX      = float(os.getenv("ARB_FEE_OKX",      "0.001"))
+ARB_FEE_MEXC     = float(os.getenv("ARB_FEE_MEXC",     "0.002"))
+ARB_FEE_KUCOIN   = float(os.getenv("ARB_FEE_KUCOIN",   "0.001"))
+ARB_FEE_COINBASE = float(os.getenv("ARB_FEE_COINBASE", "0.006"))
+ARB_FEE_BINGX    = float(os.getenv("ARB_FEE_BINGX",    "0.001"))
+ARB_FEE_GATEIO   = float(os.getenv("ARB_FEE_GATEIO",   "0.002"))
+ARB_FEE_DEFAULT  = float(os.getenv("ARB_FEE_DEFAULT",  "0.001"))
+
+# ── Circuit Breaker ───────────────────────────────────────────────────────────
+# Halt ALL new auto-trades for a user if their daily loss exceeds this percent.
+# Set to 0 to disable. Example: 5.0 = stop trading after -5% daily drawdown.
+MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", "5.0"))
+
+# Paper trading defaults
+PAPER_DEFAULT_BALANCE = float(os.getenv("PAPER_DEFAULT_BALANCE","1000.0"))

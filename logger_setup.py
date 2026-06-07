@@ -4,6 +4,7 @@ logger_setup.py - Centralised logging with trade-specific log file and
 """
 
 import logging
+import sys
 import traceback
 from functools import wraps
 
@@ -12,14 +13,21 @@ def setup_logging():
     """Call once at startup to configure all loggers."""
     fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 
+    # Ensure the console stream supports UTF-8 and safely replaces unsupported chars.
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     # Root logger — INFO to stdout + bot.log
+    file_handler = logging.FileHandler("bot.log", encoding="utf-8", errors="replace")
+    file_handler.setFormatter(logging.Formatter(fmt))
+
+    console_stream = open(sys.stderr.fileno(), mode="w", encoding="utf-8", errors="replace", closefd=False)
+    console_handler = logging.StreamHandler(console_stream)
+    console_handler.setFormatter(logging.Formatter(fmt))
+
     logging.basicConfig(
-        format=fmt,
         level=logging.INFO,
-        handlers=[
-            logging.FileHandler("bot.log"),
-            logging.StreamHandler(),
-        ]
+        handlers=[file_handler, console_handler],
     )
 
     # Trades logger — dedicated file, every signal + order
@@ -78,12 +86,16 @@ def log_signal(symbol: str, action: str, confidence: int, reason: str, user_id: 
 
 
 def log_trade_open(user_id: int, symbol: str, side: str, price: float, amount: float, exchange: str, order_id: str):
+    # Omit order_id and exact amount to limit information in log files.
+    # Full trade details are in the encrypted database with audit trail.
     get_trade_logger().info(
-        f"OPEN   | user={user_id} | {symbol} | {side.upper()} | price={price} | amount={amount} USDT | {exchange} | order={order_id}"
+        f"OPEN   | user={user_id} | {symbol} | {side.upper()} | exchange={exchange}"
     )
 
 
 def log_trade_close(user_id: int, symbol: str, reason: str, entry: float, exit_p: float, pnl: float, pnl_pct: float):
+    # Log direction of PnL only, not the exact amount.
+    outcome = "PROFIT" if pnl >= 0 else "LOSS"
     get_trade_logger().info(
-        f"CLOSE  | user={user_id} | {symbol} | {reason} | entry={entry} | exit={exit_p} | pnl={pnl:+.4f} USDT ({pnl_pct:+.2f}%)"
+        f"CLOSE  | user={user_id} | {symbol} | {reason} | outcome={outcome} ({pnl_pct:+.2f}%)"
     )

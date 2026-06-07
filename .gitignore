@@ -1,0 +1,38 @@
+# ── Secrets & credentials ──────────────────────────────────────────────────────
+.env
+!.env.example
+*.key
+*.key.pub
+*.pem
+*.p12
+
+# ── Runtime data (auto-created, never commit) ──────────────────────────────────
+bot_data.db
+bot_data.db-shm
+bot_data.db-wal
+bot_databackup.db
+*.pickle
+backups/
+
+# ── Logs ───────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Python build artifacts ─────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environment ────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── OS / editor noise ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -31,13 +31,14 @@ import ccxt
 logger = logging.getLogger(__name__)
 
 
-# ── Tunables ───────────────────────────────────────────────────────────────────
-
-# Minimum NET profit % to flag an opportunity (after ALL fees)
-MIN_PROFIT_PCT: float = 0.3
-
-# Flat withdrawal / transfer cost per cross-exchange leg (USDT)
-CROSS_EXCHANGE_WITHDRAWAL_FEE_USDT: float = 1.5
+# ── Tunables (all overrideable via .env) ───────────────────────────────────────
+from config import (
+    ARB_MIN_PROFIT_PCT           as MIN_PROFIT_PCT,
+    ARB_WITHDRAWAL_FEE_USDT      as CROSS_EXCHANGE_WITHDRAWAL_FEE_USDT,
+    ARB_FEE_BINANCE, ARB_FEE_BYBIT, ARB_FEE_OKX, ARB_FEE_MEXC,
+    ARB_FEE_KUCOIN, ARB_FEE_COINBASE, ARB_FEE_BINGX, ARB_FEE_GATEIO,
+    ARB_FEE_DEFAULT,
+)
 
 # All symbols the engine can scan (superset — user picks a subset)
 ALL_SCANNABLE_SYMBOLS: list[str] = [
@@ -75,19 +76,17 @@ ALL_TRIANGULAR_PATHS: list[tuple[str, str, str]] = [
     ("BTC/USDT",  "DOGE/BTC",  "DOGE/USDT"),
 ]
 
-# Taker fees per exchange (fraction: 0.001 = 0.1%)
-# Updated 2025: includes Coinbase Advanced, BingX, Gate.io
 EXCHANGE_TAKER_FEES: dict[str, float] = {
-    "binance":  0.001,   # 0.10%
-    "bybit":    0.001,   # 0.10%
-    "okx":      0.001,   # 0.10%
-    "mexc":     0.002,   # 0.20%
-    "kucoin":   0.001,   # 0.10%
-    "coinbase": 0.006,   # 0.60% (Advanced Trade taker, can be lower with volume)
-    "bingx":    0.001,   # 0.10%
-    "gateio":   0.002,   # 0.20%
+    "binance":  ARB_FEE_BINANCE,
+    "bybit":    ARB_FEE_BYBIT,
+    "okx":      ARB_FEE_OKX,
+    "mexc":     ARB_FEE_MEXC,
+    "kucoin":   ARB_FEE_KUCOIN,
+    "coinbase": ARB_FEE_COINBASE,
+    "bingx":    ARB_FEE_BINGX,
+    "gateio":   ARB_FEE_GATEIO,
 }
-DEFAULT_TAKER_FEE: float = 0.001
+DEFAULT_TAKER_FEE: float = ARB_FEE_DEFAULT
 
 
 # ── Data classes ───────────────────────────────────────────────────────────────
