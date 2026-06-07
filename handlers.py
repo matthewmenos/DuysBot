@@ -66,6 +66,36 @@ init_db()
 from utils import require_granted, require_creds, is_admin, is_granted
 
 
+# ── Auto-delete helper ────────────────────────────────────────────────────────
+_DELETE_DELAY = 120  # seconds before sensitive messages self-delete
+
+async def _delete_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """job_queue callback — silently deletes a message."""
+    data = context.job.data
+    try:
+        await context.bot.delete_message(chat_id=data["chat_id"], message_id=data["message_id"])
+    except Exception:
+        pass  # already deleted or bot lost permission — ignore
+
+async def _send_expiring(context, chat_id: int, text: str, **kwargs) -> None:
+    """
+    Send a message that auto-deletes after _DELETE_DELAY seconds.
+    Appends a notice so the user knows it will disappear.
+    """
+    notice = f"\n\n<i>🕐 This message deletes in {_DELETE_DELAY} seconds.</i>"
+    parse_mode = kwargs.pop("parse_mode", ParseMode.HTML)
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=text + notice,
+        parse_mode=parse_mode,
+        **kwargs,
+    )
+    context.job_queue.run_once(
+        _delete_message,
+        when=_DELETE_DELAY,
+        data={"chat_id": chat_id, "message_id": msg.message_id},
+    )
+
 
 # ── Persistent Reply Keyboards ────────────────────────────────────────────────
 
@@ -1271,7 +1301,8 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link     = get_referral_link(uid, bot_info.username)
     stats    = get_referral_stats(uid)
 
-    await update.effective_message.reply_text(
+    await _send_expiring(
+        context, update.effective_user.id,
         f"🔗 <b>Your Referral Link</b>\n\n"
         f"<code>{link}</code>\n\n"
         f"Share this link. When someone subscribes through it, "
@@ -1284,7 +1315,6 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("📊 My Status", callback_data="cmd_mystatus"),
         ]]),
-        parse_mode=ParseMode.HTML
     )
 
 
@@ -2444,10 +2474,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from onboarding import onboard_step_symbol
         PENDING_INPUT[uid] = {"field": "api_key", "exchange": exch_id, "onboarding": True}
         passphrase_note = " (also needs a passphrase)" if exch_id in PASSPHRASE_EXCHANGES else ""
-        await query.message.reply_text(
+        await _send_expiring(
+            context, query.message.chat_id,
             f"🔑 <b>{EXCHANGE_LABELS.get(exch_id, exch_id)}</b>{passphrase_note}\n\n"
             f"Please send your <b>API Key</b>:",
-            parse_mode=ParseMode.HTML
         )
 
     elif data.startswith("ob_sym_"):
@@ -2588,7 +2618,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "amount":  amount,
             "network": net_key,
         }
-        await query.message.reply_text(
+        await _send_expiring(
+            context, query.message.chat_id,
             f"🪙 <b>Pay with {token} on {net_info['label']}</b>\n\n"
             f"Plan:    <b>{months} Month{'s' if months > 1 else ''}</b>\n"
             f"Amount:  <code>{amount:.2f} USDT</code>\n\n"
@@ -2596,7 +2627,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<code>{address}</code>\n\n"
             f"⚠️ <b>Important:</b> {note}\n\n"
             f"After sending, paste your <b>transaction hash (TX ID)</b> here:",
-            parse_mode=ParseMode.HTML
         )
 
     # Legacy single-plan crypto_N callbacks (kept for backward compat)
@@ -2678,10 +2708,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         passphrase_note = " (also requires a passphrase)" if exch_id in PASSPHRASE_EXCHANGES else ""
         extra_note = get_exchange_note(exch_id)
         note_block = f"\n\nℹ️ {extra_note}" if extra_note else ""
-        await query.message.reply_text(
+        await _send_expiring(
+            context, query.message.chat_id,
             f"🔑 <b>{EXCHANGE_LABELS.get(exch_id, exch_id)}</b>{passphrase_note}{note_block}\n\n"
             f"Please send your <b>API Key</b>:",
-            parse_mode=ParseMode.HTML
         )
 
     elif data.startswith("exch_"):
@@ -2705,10 +2735,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             passphrase_note = " (also requires a passphrase)" if exch_id in PASSPHRASE_EXCHANGES else ""
             extra_note = get_exchange_note(exch_id)
             note_block = f"\n\nℹ️ {extra_note}" if extra_note else ""
-            await query.message.reply_text(
+            await _send_expiring(
+                context, query.message.chat_id,
                 f"🔑 <b>{EXCHANGE_LABELS.get(exch_id, exch_id)}</b>{passphrase_note}{note_block}\n\n"
                 f"Please send your <b>API Key</b>:",
-                parse_mode=ParseMode.HTML
             )
 
 
@@ -3042,10 +3072,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fmt = check_key_format(exch_id, api_key_stored, text)
             if not fmt["valid"]:
                 PENDING_INPUT[uid]["field"] = "api_key"
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text=f"❌ <b>Invalid keys</b>\n\n{fmt['error']}\n\nPlease send your <b>API Key</b> again:",
-                    parse_mode=ParseMode.HTML
+                await _send_expiring(
+                    context, uid,
+                    f"❌ <b>Invalid keys</b>\n\n{fmt['error']}\n\nPlease send your <b>API Key</b> again:",
                 )
             else:
                 save_exchange_creds(uid, exch_id, api_key_stored, text)
