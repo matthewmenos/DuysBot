@@ -115,7 +115,7 @@ def get_main_menu(uid: int) -> ReplyKeyboardMarkup:
     ]
     if uid in ADMIN_IDS:
         rows.append([KeyboardButton("👥 Subscribers"), KeyboardButton("📴 Close All")])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, persistent=True)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
 def get_unauth_menu() -> ReplyKeyboardMarkup:

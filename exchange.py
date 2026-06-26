@@ -16,7 +16,7 @@ SUPPORTED_EXCHANGES = {
     "kucoin":   ccxt.kucoin,
     "coinbase": ccxt.coinbase,   # Coinbase Advanced Trade
     "bingx":    ccxt.bingx,
-    "gateio":   ccxt.gateio,
+    "gateio":   ccxt.gate,
 }
 
 EXCHANGE_LABELS = {
