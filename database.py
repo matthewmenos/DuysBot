@@ -5,6 +5,7 @@ database.py - SQLite persistence layer for users, trades, settings
 import json
 from datetime import datetime, timedelta
 from config import DB_PATH
+from db import USE_POSTGRES
 
 # Lazy import encryption to avoid circular import at startup
 def _enc(val: str) -> str:
@@ -381,8 +382,29 @@ def init_db():
         for sql in migrations:
             try:
                 conn.execute(sql)
+                if USE_POSTGRES:
+                    conn.commit()  # isolate each migration so a failure can't abort the rest
             except Exception:
+                try:
+                    if USE_POSTGRES:
+                        conn.rollback()
+                except Exception:
+                    pass
                 pass  # already exists — safe to ignore
+
+    # Postgres: verify the schema actually bootstrapped (fail fast with a clear
+    # error instead of silently running against an empty database).
+    if USE_POSTGRES:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT to_regclass('public.users') AS t FROM (SELECT 1) x"
+            ).fetchone()
+        if not row or not row["t"]:
+            raise RuntimeError(
+                "PostgreSQL schema bootstrap FAILED - 'users' table is missing. "
+                "Check the Runtime logs for 'pg executescript statement skipped' "
+                "warnings, and confirm DATABASE_URL points at the intended database."
+            )
 
 
 # ── User helpers ──────────────────────────────────────────────────────────────

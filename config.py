@@ -116,11 +116,19 @@ CRYPTO_NETWORKS = {
 }
 
 # ── Free Trial ────────────────────────────────────────────────────────────────
-FREE_TRIAL_DAYS = int(os.getenv("FREE_TRIAL_DAYS", "7"))  # once per account lifetime
+def _env_int(name: str, default: int) -> int:
+    """Parse an integer env var defensively so a bad value can't crash startup."""
+    try:
+        return int(float(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+FREE_TRIAL_DAYS = _env_int("FREE_TRIAL_DAYS", 7)  # once per account lifetime
 
 # ── Referral Rewards ──────────────────────────────────────────────────────────
 # Months of free access awarded to the referrer when a referred user subscribes.
-REFERRAL_REWARD_MONTHS = int(os.getenv("REFERRAL_REWARD_MONTHS", "1"))
+REFERRAL_REWARD_MONTHS = _env_int("REFERRAL_REWARD_MONTHS", 1)
 
 # ── Signal & News APIs ────────────────────────────────────────────────────────
 CRYPTOCOMPARE_API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY", "")

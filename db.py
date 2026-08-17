@@ -49,6 +49,7 @@ class Row(dict):
 _RE_PLACEHOLDER = re.compile(r"(?<![A-Za-z0-9_])[?](?![A-Za-z0-9_])")
 _RE_PG_AUTOINCREMENT = re.compile(r"INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT", re.IGNORECASE)
 _RE_INSERT_OR_IGNORE = re.compile(r"^\s*INSERT\s+OR\s+IGNORE\s+INTO", re.IGNORECASE)
+_RE_ALTER_ADD_COLUMN = re.compile(r"(ALTER\s+TABLE\s+\S+\s+ADD\s+COLUMN\s+)(?=\S)", re.IGNORECASE)
 
 
 def _translate_pg(sql: str) -> str:
@@ -60,6 +61,11 @@ def _translate_pg(sql: str) -> str:
         sql = _RE_INSERT_OR_IGNORE.sub("INSERT INTO", sql, count=1)
         sql = re.sub(r";\s*$", "", sql)
         sql = sql.rstrip() + " ON CONFLICT DO NOTHING"
+    # ALTER TABLE t ADD COLUMN c ... -> ALTER TABLE t ADD COLUMN IF NOT EXISTS c ...
+    # PostgreSQL aborts the whole transaction when "column already exists", which
+    # would silently discard the rest of the schema during bootstrap. Making the
+    # ALTER idempotent keeps migrations safe to re-run.
+    sql = _RE_ALTER_ADD_COLUMN.sub(r"\1IF NOT EXISTS ", sql, count=1)
     # ? -> %s (postgres placeholders)
     sql = _RE_PLACEHOLDER.sub("%s", sql)
     return sql
@@ -134,18 +140,26 @@ class PgConnection:
         return PgCursor(cur)
 
     def executescript(self, script):
-        """Run a multi-statement script (used by database.init_db schema creation)."""
+        """Run a multi-statement script (used by database.init_db schema creation).
+
+        Each statement is committed on its own so that one bad statement cannot
+        abort the entire PostgreSQL transaction (which would otherwise silently
+        discard every later CREATE TABLE and leave an empty schema).
+        """
         for stmt in script.split(";"):
             stmt = _strip_sql_comments(stmt).strip()
             if not stmt:
                 continue
             try:
                 self.execute(stmt)
+                self._conn.commit()
             except Exception as e:
-                # Tables/columns may already exist — mirror SQLite's migration
-                # flow which silently continues on "already exists".
-                logger.warning("pg executescript statement skipped (%s): %s",
-                               stmt.splitlines()[0][:60] if stmt.splitlines() else "", e)
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                head = (stmt.splitlines()[0][:80] if stmt.splitlines() else stmt)
+                logger.warning("pg executescript statement skipped (%s): %s", head, e)
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
