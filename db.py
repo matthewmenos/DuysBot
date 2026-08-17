@@ -1,5 +1,4 @@
-"""
-db.py - PostgreSQL data-access layer for DuysBot.
+"""db.py - PostgreSQL data-access layer for DuysBot.
 
 Every ``get_conn()`` call opens a PostgreSQL connection using the
 ``DATABASE_URL`` connection string (set in config.py / .env).
@@ -27,15 +26,6 @@ import logging
 from config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
-
-
-class Row(dict):
-    """dict-like row that also supports integer index access (positional as well as by key)."""
-
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            return dict.__getitem__(self, list(self.keys())[key])
-        return dict.__getitem__(self, key)
 
 
 # ── PostgreSQL SQL translation ────────────────────────────────────────────────
@@ -95,8 +85,20 @@ class PgCursor:
         return [self._wrap(r) for r in self._cur.fetchall()]
 
 
+class Row(dict):
+    """dict-like row that also supports integer index access (positional as well as by key)."""
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            keys = list(self.keys())
+            if -len(keys) <= key < len(keys):
+                return dict.__getitem__(self, keys[key])
+            raise IndexError(key)
+        return dict.__getitem__(self, key)
+
+
 class PgConnection:
-    """PostgreSQL connection mimicking the connection surface the bot uses.""""""
+    """PostgreSQL connection mimicking the connection surface the bot uses."""
 
     def __init__(self):
         import psycopg
@@ -156,7 +158,7 @@ class PgConnection:
                 logger.warning("pg executescript statement skipped (%s): %s", head, e)
 
 
-# ── Public entry point ────────────────────────────────────────────────────────
+# ── Public entry point ───────────────────────────────────────────────────────
 
 def get_conn():
     """Return a PostgreSQL connection."""

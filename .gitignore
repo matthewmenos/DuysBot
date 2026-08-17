@@ -5,6 +5,7 @@
 *.key.pub
 *.pem
 *.p12
+temp/
 
 # ── Runtime data (auto-created, never commit) ──────────────────────────────────
 bot_data.db
