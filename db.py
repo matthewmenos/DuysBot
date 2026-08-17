@@ -1,42 +1,36 @@
 """
-db.py - Unified data-access layer (SQLite locally, PostgreSQL on Render).
+db.py - PostgreSQL data-access layer for DuysBot.
 
-Behaviour
----------
-* If ``DATABASE_URL`` is set (Render auto-injects it for attached PostgreSQL
-  databases), every ``get_conn()`` call opens a PostgreSQL connection.
-* Otherwise SQLite is used exactly as before (``bot_data.db``), so local
-  development keeps working unchanged.
+Every ``get_conn()`` call opens a PostgreSQL connection using the
+``DATABASE_URL`` connection string (set in config.py / .env).
 
 SQL translation
 ---------------
-The rest of the codebase writes SQLite-flavoured SQL:
-  * ``?`` placeholders            -> ``%s`` for PostgreSQL
-  * ``INSERT OR IGNORE``          -> ``INSERT ... ON CONFLICT DO NOTHING``
-  * ``INTEGER PRIMARY KEY AUTOINCREMENT`` -> ``BIGSERIAL PRIMARY KEY``
+The rest of the codebase writes portable SQL with a few convenience idioms:
+  * ``?`` placeholders                        -> ``%s`` for PostgreSQL
+  * ``INSERT OR IGNORE``                      -> ``INSERT ... ON CONFLICT DO NOTHING``
+  * ``INTEGER PRIMARY KEY AUTOINCREMENT``     -> ``BIGSERIAL PRIMARY KEY``
 
-These are converted on the fly inside ``PgConnection``, so callers (database.py,
-referral.py, smart_orders.py, handlers.py, scheduler.py) do not need to change.
-Rows are dict-like and also support integer index access (sqlite3.Row style).
+These are converted on the fly inside ``PgConnection``, so callers
+(database.py, referral.py, smart_orders.py, handlers.py, scheduler.py)
+do not need to change.
+
+Rows are dict-like and also support integer index access (positional as well as by key).
 
 ``INSERT ... RETURNING id`` is used directly by callers that need the new row
-id — this is supported natively by both SQLite (>= 3.35) and PostgreSQL.
+id — this is supported natively by PostgreSQL.
 """
 
-import os
 import re
 import logging
 
-from config import DB_PATH
+from config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-USE_POSTGRES = bool(DATABASE_URL)
-
 
 class Row(dict):
-    """dict-like row that also supports integer index access (sqlite3.Row style)."""
+    """dict-like row that also supports integer index access (positional as well as by key)."""
 
     def __getitem__(self, key):
         if isinstance(key, int):
@@ -53,7 +47,7 @@ _RE_ALTER_ADD_COLUMN = re.compile(r"(ALTER\s+TABLE\s+\S+\s+ADD\s+COLUMN\s+)(?=\S
 
 
 def _translate_pg(sql: str) -> str:
-    """Convert SQLite-flavoured SQL to PostgreSQL-flavoured SQL."""
+    """Convert portable SQL to PostgreSQL SQL."""
     # DDL: INTEGER PRIMARY KEY AUTOINCREMENT -> BIGSERIAL PRIMARY KEY
     sql = _RE_PG_AUTOINCREMENT.sub("BIGSERIAL PRIMARY KEY", sql)
     # INSERT OR IGNORE INTO t (...) VALUES (...) -> INSERT INTO t (...) VALUES (...) ON CONFLICT DO NOTHING
@@ -102,7 +96,7 @@ class PgCursor:
 
 
 class PgConnection:
-    """PostgreSQL connection mimicking the sqlite3.Connection surface the bot uses."""
+    """PostgreSQL connection mimicking the connection surface the bot uses.""""""
 
     def __init__(self):
         import psycopg
@@ -165,15 +159,5 @@ class PgConnection:
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def get_conn():
-    """Return a database connection (PostgreSQL if DATABASE_URL set, else SQLite)."""
-    if USE_POSTGRES:
-        return PgConnection()
-
-    import sqlite3
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    # WAL mode: allows concurrent reads, survives crashes without data loss
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    """Return a PostgreSQL connection."""
+    return PgConnection()

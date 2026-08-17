@@ -1,5 +1,5 @@
 """
-encryption.py - AES-256 (Fernet) encryption for API keys stored in SQLite.
+encryption.py - AES-256 (Fernet) encryption for API keys stored in PostgreSQL.
 
 Generate a master key once and store it in your .env:
     python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

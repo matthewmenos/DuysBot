@@ -44,7 +44,7 @@ K_ARB_SEL            = "arb_sel"             # {uid: [str, ...]}  token picker d
 def build_persistence() -> PicklePersistence:
     """
     Return a configured PicklePersistence instance.
-    Only bot_data is persisted (user settings live in SQLite; user_data unused).
+    Only bot_data is persisted (user settings live in PostgreSQL; user_data unused).
     """
     from telegram.ext._basepersistence import PersistenceInput
 

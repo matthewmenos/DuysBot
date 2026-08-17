@@ -151,7 +151,16 @@ POPULAR_SYMBOLS = [
 ]
 
 # ── Database ──────────────────────────────────────────────────────────────────
-DB_PATH          = os.getenv("DB_PATH",          "bot_data.db")
+# PostgreSQL connection string — REQUIRED. The bot will not start without it.
+# Example: postgresql://user:password@host:5432/duysbot
+# On Render, use your PostgreSQL instance's "Internal Database URL".
+DATABASE_URL     = os.getenv("DATABASE_URL",     "").strip()
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is not set. Add it to your .env file:\n"
+        "  DATABASE_URL=postgresql://user:password@host:5432/duysbot\n"
+        "On Render, use the Internal Database URL of your attached PostgreSQL instance."
+    )
 PERSISTENCE_FILE = os.getenv("PERSISTENCE_FILE", "bot_persistence.pickle")
 
 # ── Scheduler ────────────────────────────────────────────────────────────────

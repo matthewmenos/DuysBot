@@ -228,7 +228,7 @@ All run automatically inside the bot process:
 | Signal suggestions | 5 min | Scans 12 top pairs, notifies on ≥70% confidence |
 | Daily PnL report | Daily 8 AM | Sends wins/losses/PnL summary to each user |
 | Renewal reminders | Every 10 min | Notifies users 3 days and 1 day before expiry |
-| DB backup | Every 24h | Backs up `bot_data.db` to `backups/`, keeps last 7 |
+| DB backup | Every 24h | `pg_dump` to `backups/`, encrypted, keeps last 7 |
 | API key expiry | Every 10 min | Warns MEXC users 14, 7, 3, 1 day before 90-day expiry |
 | SL warning | Every 5 min | Alerts user when trade reaches 80% of stop loss |
 | Confirm timeout | 60s | Auto-skips pending trade confirmations after 30s |
@@ -241,7 +241,7 @@ All run automatically inside the bot process:
 trading_bot/
 ├── main.py              Entry point — registers commands, starts bot + webhook + scheduler
 ├── config.py            All environment variables and constants
-├── database.py          SQLite layer — all DB queries and helpers
+├── database.py          PostgreSQL layer — all DB queries and helpers
 ├── exchange.py          ccxt connector — Binance, Bybit, OKX, MEXC, KuCoin
 ├── strategy.py          Signal engine — RSI, EMA, MACD, BB, volume, news, CMC
 ├── scheduler.py         All background tasks
@@ -254,12 +254,12 @@ trading_bot/
 ├── encryption.py        Fernet AES-256 encryption for API keys
 ├── logger_setup.py      Structured logging + admin error reporting
 ├── rate_limiter.py      Per-user command cooldowns and trade deduplication
-├── backup.py            SQLite backup management
+├── backup.py            PostgreSQL backup management (pg_dump)
 ├── referral.py          Referral link generation, tracking, and rewards
 ├── utils.py             Shared decorators (require_granted, require_creds)
 ├── requirements.txt
 ├── .env.example
-├── bot_data.db          Created automatically on first run
+├── bot_persistence.pickle  Bot wizard state & cooldowns (PTB PicklePersistence)
 ├── bot.log              General bot log
 ├── trades.log           Dedicated trade activity log
 └── backups/             Daily DB backups (auto-created)
@@ -324,7 +324,7 @@ Get a free SSL cert: `sudo certbot --nginx -d yourdomain.com`
 
 | Area | Implementation |
 |---|---|
-| API key storage | Fernet AES-256 encrypted in SQLite |
+| API key storage | Fernet AES-256 encrypted in PostgreSQL |
 | DB backups | Encrypted with the same Fernet key — never stored plaintext |
 | API key entry | Messages deleted from chat immediately after input |
 | Paystack webhooks | HMAC-SHA512 signature verified on every event |
@@ -386,7 +386,7 @@ Get a free SSL cert: `sudo certbot --nginx -d yourdomain.com`
 | `CRYPTOCOMPARE_API_KEY` | No | — | News sentiment scoring (cryptocompare.com, free tier). |
 | `COINMARKETCAP_API_KEY` | No | — | CMC rank and market cap signals (coinmarketcap.com/api, free). |
 | `NEWSAPI_KEY` | No | — | General crypto headlines (newsapi.org, free tier). |
-| `DB_PATH` | No | `bot_data.db` | SQLite database file path. |
+| `DATABASE_URL` | **Yes** | — | PostgreSQL connection string (required). Example: `postgresql://user:pass@host:5432/duysbot`. |
 | `PERSISTENCE_FILE` | No | `bot_persistence.pickle` | PTB PicklePersistence file for wizard state and cooldowns. |
 | `PAPER_DEFAULT_BALANCE` | No | `1000.0` | Starting paper-trading balance for new users (USDT). |
 
