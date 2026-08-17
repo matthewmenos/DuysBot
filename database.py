@@ -2,7 +2,6 @@
 database.py - SQLite persistence layer for users, trades, settings
 """
 
-import sqlite3
 import json
 from datetime import datetime, timedelta
 from config import DB_PATH
@@ -22,6 +21,12 @@ def _enc(val: str) -> str:
 def _dec(val: str) -> str:
     if not val:
         return val
+    # Plaintext value (never encrypted — e.g. legacy data, or written by an old
+    # bug that stored decrypted credentials into a column that should hold
+    # ciphertext). Pass it through unchanged; attempting to decrypt it would
+    # only fail and blank out the user's credentials.
+    if not str(val).startswith("gAAAAA"):
+        return val
     try:
         from encryption import decrypt, is_configured
         if is_configured():
@@ -32,13 +37,9 @@ def _dec(val: str) -> str:
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    # WAL mode: allows concurrent reads, survives crashes without data loss
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    """Return a connection to the active database (SQLite local / Postgres on Render)."""
+    from db import get_conn as _db_get_conn
+    return _db_get_conn()
 
 
 def init_db():
@@ -103,6 +104,7 @@ def init_db():
             exchange      TEXT,
             order_id      TEXT,
             signal        TEXT,
+            close_reason  TEXT,
             opened_at     TEXT DEFAULT CURRENT_TIMESTAMP,
             closed_at     TEXT
         );
@@ -346,6 +348,7 @@ def init_db():
             "ALTER TABLE user_settings ADD COLUMN paper_balance REAL DEFAULT 1000.0",
             "ALTER TABLE user_settings ADD COLUMN paper_start_balance REAL DEFAULT 1000.0",
             "ALTER TABLE users ADD COLUMN webhook_token TEXT",
+            "ALTER TABLE trades ADD COLUMN close_reason TEXT",
             """CREATE TABLE IF NOT EXISTS signal_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id           INTEGER NOT NULL,
@@ -463,11 +466,17 @@ def switch_exchange(user_id: int, exchange: str) -> bool:
     creds = get_exchange_creds(user_id, exchange)
     if not creds:
         return False
+    # NOTE: creds are already decrypted here. The users table stores ENCRYPTED
+    # credentials (see get_user/_dec), so re-encrypt before writing — writing
+    # plaintext here previously made get_user() return an empty key and broke
+    # the "Use saved keys" flow with a bogus "No Exchange Connected" error.
     with get_conn() as conn:
         conn.execute("""
             UPDATE users SET exchange=?, api_key=?, api_secret=?, api_pass=?
             WHERE user_id=?
-        """, (exchange, creds["api_key"], creds["api_secret"], creds["api_pass"], user_id))
+        """, (exchange,
+              _enc(creds["api_key"]), _enc(creds["api_secret"]), _enc(creds["api_pass"]),
+              user_id))
     return True
 
 
@@ -572,11 +581,10 @@ def update_setting(user_id: int, key: str, value):
 
 def open_trade(user_id, symbol, side, entry_price, amount, exchange, order_id, signal):
     with get_conn() as conn:
-        cur = conn.execute("""
+        trade_id = conn.execute("""
             INSERT INTO trades (user_id, symbol, side, entry_price, amount, exchange, order_id, signal)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, symbol, side, entry_price, amount, exchange, order_id, signal))
-        trade_id = cur.lastrowid
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+        """, (user_id, symbol, side, entry_price, amount, exchange, order_id, signal)).fetchone()["id"]
     write_audit(user_id, "trade_open", {
         "trade_id": trade_id, "symbol": symbol, "side": side,
         "entry_price": entry_price, "amount": amount, "signal": signal
@@ -904,11 +912,10 @@ def get_mexc_key_age_days(user_id: int) -> int | None:
 def add_price_alert(user_id: int, symbol: str, target_price: float, condition: str, note: str = "") -> int:
     """Add a new price alert. condition = 'above' or 'below'. Returns alert id."""
     with get_conn() as conn:
-        cur = conn.execute("""
+        return conn.execute("""
             INSERT INTO price_alerts (user_id, symbol, target_price, condition, note)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, symbol.upper(), target_price, condition, note))
-        return cur.lastrowid
+            VALUES (?, ?, ?, ?, ?) RETURNING id
+        """, (user_id, symbol.upper(), target_price, condition, note)).fetchone()["id"]
 
 
 def get_active_alerts(user_id: int = None):
@@ -987,11 +994,10 @@ def get_all_subscribed_users():
 def create_trade_confirmation(user_id: int, symbol: str, side: str, price: float, amount: float, signal_data: str) -> int:
     import json as _json
     with get_conn() as conn:
-        cur = conn.execute("""
+        return conn.execute("""
             INSERT INTO trade_confirmations (user_id, symbol, side, price, amount, signal_data, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending')
-        """, (user_id, symbol, side, price, amount, signal_data))
-        return cur.lastrowid
+            VALUES (?, ?, ?, ?, ?, ?, 'pending') RETURNING id
+        """, (user_id, symbol, side, price, amount, signal_data)).fetchone()["id"]
 
 
 def resolve_trade_confirmation(confirm_id: int, status: str):
@@ -1456,11 +1462,10 @@ def update_paper_balance(user_id: int, new_balance: float):
 
 def open_paper_trade(user_id: int, symbol: str, side: str, entry_price: float, amount: float) -> int:
     with get_conn() as conn:
-        cur = conn.execute("""
+        return conn.execute("""
             INSERT INTO paper_trades (user_id, symbol, side, entry_price, amount)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, symbol, side, entry_price, amount))
-        return cur.lastrowid
+            VALUES (?, ?, ?, ?, ?) RETURNING id
+        """, (user_id, symbol, side, entry_price, amount)).fetchone()["id"]
 
 
 def open_paper_trade_atomic(user_id: int, symbol: str, side: str,
@@ -1478,11 +1483,10 @@ def open_paper_trade_atomic(user_id: int, symbol: str, side: str,
         balance = float(row["paper_balance"]) if row and row["paper_balance"] is not None else 1000.0
         if balance < amount:
             raise ValueError(f"Insufficient paper balance: {balance:.2f} < {amount:.2f}")
-        cur = conn.execute("""
+        trade_id = conn.execute("""
             INSERT INTO paper_trades (user_id, symbol, side, entry_price, amount)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, symbol, side, entry_price, amount))
-        trade_id = cur.lastrowid
+            VALUES (?, ?, ?, ?, ?) RETURNING id
+        """, (user_id, symbol, side, entry_price, amount)).fetchone()["id"]
         new_balance = round(balance - amount, 6)
         conn.execute(
             "UPDATE user_settings SET paper_balance=? WHERE user_id=?",
@@ -1576,12 +1580,11 @@ def create_dca_plan(user_id: int, exchange_id: str, symbol: str,
     from datetime import datetime, timedelta
     next_run = (datetime.utcnow() + timedelta(seconds=interval_sec)).isoformat()
     with get_conn() as conn:
-        cur = conn.execute("""
+        return conn.execute("""
             INSERT INTO dca_plans
                 (user_id, exchange_id, symbol, amount_usdt, interval_sec, price_ceiling, next_run_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, exchange_id, symbol, amount_usdt, interval_sec, price_ceiling, next_run))
-        return cur.lastrowid
+            VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id
+        """, (user_id, exchange_id, symbol, amount_usdt, interval_sec, price_ceiling, next_run)).fetchone()["id"]
 
 def get_dca_plans(user_id: int) -> list:
     with get_conn() as conn:
@@ -1653,13 +1656,12 @@ def create_grid_plan(user_id: int, exchange_id: str, symbol: str,
                      total_usdt: float) -> int:
     spacing = (upper - lower) / (levels - 1) if levels > 1 else 0
     with get_conn() as conn:
-        cur = conn.execute("""
+        return conn.execute("""
             INSERT INTO grid_plans
                 (user_id, exchange_id, symbol, lower_price, upper_price,
                  grid_levels, total_usdt, grid_spacing)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, exchange_id, symbol, lower, upper, levels, total_usdt, spacing))
-        return cur.lastrowid
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+        """, (user_id, exchange_id, symbol, lower, upper, levels, total_usdt, spacing)).fetchone()["id"]
 
 def get_active_grids(user_id: int = None) -> list:
     with get_conn() as conn:
@@ -1715,11 +1717,11 @@ def publish_strategy(user_id: int, name: str, description: str, settings: dict) 
     with get_conn() as conn:
         # Replace any existing strategy for this user
         conn.execute("DELETE FROM strategies WHERE user_id=?", (user_id,))
-        cur = conn.execute("""
+        return conn.execute("""
             INSERT INTO strategies
                 (user_id, name, description, symbol, multi_symbols,
                  take_profit, stop_loss, tp_mode, sl_mode, trailing_stop, trade_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
         """, (
             user_id, name, description,
             settings.get("symbol", "BTC/USDT"),
@@ -1730,8 +1732,7 @@ def publish_strategy(user_id: int, name: str, description: str, settings: dict) 
             settings.get("sl_mode", "pct"),
             settings.get("trailing_stop", 0),
             settings.get("trade_mode", "auto"),
-        ))
-        return cur.lastrowid
+        )).fetchone()["id"]
 
 def get_strategies(limit: int = 20, offset: int = 0) -> list:
     with get_conn() as conn:

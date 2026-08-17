@@ -29,12 +29,11 @@ def create_smart_order(
 ) -> int:
     """Insert a smart order record. Returns new id."""
     with _db() as conn:
-        cur = conn.execute("""
+        return conn.execute("""
             INSERT INTO smart_orders
                 (user_id, exchange_id, type, symbol, side, total_usdt, params, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
-        """, (user_id, exchange_id, order_type, symbol, side, total_usdt, json.dumps(params)))
-        return cur.lastrowid
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active') RETURNING id
+        """, (user_id, exchange_id, order_type, symbol, side, total_usdt, json.dumps(params))).fetchone()["id"]
 
 
 def get_active_smart_orders(user_id: int = None) -> list:
