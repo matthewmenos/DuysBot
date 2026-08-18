@@ -134,7 +134,7 @@ BUTTON_MAP: dict = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    upsert_user(user.id, user.username or "", is_admin=1 if is_admin(user.id) else 0)
+    upsert_user(int(user.id), user.username or "", granted=0, is_admin=int(1 if is_admin(user.id) else 0))
 
     if not is_admin(user.id) and not has_active_access(user.id):
         trial_used  = has_used_trial(user.id)
