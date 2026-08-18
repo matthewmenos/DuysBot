@@ -320,6 +320,15 @@ def init_db():
             created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
             triggered_at TEXT DEFAULT NULL
         );
+
+        -- PTB persistence state (bot_data: wizard state, signal cooldowns,
+        -- arb fingerprints) stored in PostgreSQL so it survives Render
+        -- redeploys.  Managed by persistence.PostgresPersistence.
+        CREATE TABLE IF NOT EXISTS bot_state (
+            key        TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         """)
 
                 # ── Migrate existing databases — add columns added in later versions ──

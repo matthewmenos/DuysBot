@@ -161,7 +161,6 @@ if not DATABASE_URL:
         "  DATABASE_URL=postgresql://user:password@host:5432/duysbot\n"
         "On Render, use the Internal Database URL of your attached PostgreSQL instance."
     )
-PERSISTENCE_FILE = os.getenv("PERSISTENCE_FILE", "bot_persistence.pickle")
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
 TRADE_LOOP_INTERVAL = 60

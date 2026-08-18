@@ -5,7 +5,9 @@ Entry point: starts the bot and scheduler
 
 import asyncio
 import logging
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
+from telegram import BotCommand
+from telegram.error import Conflict, RetryAfter
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 from config import BOT_TOKEN
 from handlers import (
     start, balance, start_trade, stop_trade, settings, history,
@@ -32,6 +34,44 @@ from persistence import build_persistence, restore_in_memory_state, sync_to_bot_
 
 from logger_setup import setup_logging, init_error_reporter
 logger = setup_logging()
+
+
+# ── Error Handler ─────────────────────────────────────────────────────────────
+#
+# Handles errors that bubble up from command / callback handlers.
+# `Conflict` and `RetryAfter` raised by the *polling* loop are handled
+# internally by PTB's network_retry_loop — the handler below only catches
+# errors from update handlers, but we register it so that NO error is
+# logged with the "No error handlers are registered" message.
+
+async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log errors, notify admins for real failures, and silently absorb
+    transient Telegram errors that are safe to ignore."""
+    error = context.error
+
+    # Transient — bot recovers automatically.  Typical during Render
+    # deploys when two instances briefly overlap (getUpdates conflict).
+    if isinstance(error, Conflict):
+        logger.warning(
+            "Telegram Conflict (likely deploy overlap) — bot will "
+            "retry getUpdates automatically."
+        )
+        return
+
+    # Rate-limited — just wait and retry.
+    if isinstance(error, RetryAfter):
+        delay = getattr(error, "retry_after", 0)
+        logger.warning("Rate-limited by Telegram — retry after %ss", delay)
+        return
+
+    # Everything else — log full traceback and alert admins.
+    logger.error("Unhandled error in handler", exc_info=context.error)
+    try:
+        from config import ADMIN_IDS as _admins
+        from logger_setup import report_error_to_admin
+        await report_error_to_admin(context, error, source="error_handler")
+    except Exception:
+        pass
 
 
 def main():
@@ -99,8 +139,8 @@ def main():
     app.add_handler(CommandHandler("market",       market_cmd))
     app.add_handler(CommandHandler("audit",        audit_cmd))
 
-    from telegram import BotCommand
-
+    
+    # Bot command menu — registered with Telegram in _post_init
     BOT_COMMANDS = [
         BotCommand("start",       "🚀 Start / onboarding"),
         BotCommand("balance",     "💰 View your exchange balance"),
@@ -155,7 +195,7 @@ def main():
 
     async def _sync_state(context):
         """Flush live scheduler dicts back into bot_data every 2 min so
-        PicklePersistence can write them to disk on its 30-second cycle."""
+        PostgresPersistence can persist them to the database on its 60-second cycle."""
         sync_to_bot_data(context.application.bot_data)
 
     app.job_queue.run_repeating(_sync_state, interval=120, first=30)
@@ -194,6 +234,7 @@ def main():
         logger.warning("⚠️  ENCRYPTION_KEY not set — API keys stored unencrypted. See encryption.py for setup.")
 
     logger.info("CryptoTradeBot is starting...")
+    app.add_error_handler(_error_handler)
     app.run_polling(drop_pending_updates=True)
 
 

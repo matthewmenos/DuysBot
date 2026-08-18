@@ -2,15 +2,11 @@
 persistence.py — Restart-safe state management for DuysBot
 ===========================================================
 
-PTB PicklePersistence stores bot_data and user_data to disk automatically.
-This module provides:
+PTB persistence stores bot_data in PostgreSQL (not local files), so it
+works on Render's ephemeral filesystem and survives redeploys.
 
-  • A single source of truth for all bot-level and user-level state keys
-  • Typed helpers that read/write through bot_data with safe defaults
-  • A restore() hook called once at startup to re-populate the module-level
-    dicts that scheduler.py and utils.py use (backwards-compatibility shim)
-
-State that survives restarts (stored in PTB bot_data via PicklePersistence):
+State that survives restarts (stored in the ``bot_state`` table via the
+``PostgresPersistence`` class):
   ┌─ PENDING_INPUT         {uid: {field, ...}}   multi-step wizard state
   ├─ RECENTLY_SUGGESTED    {uid: {symbol: ts}}   signal notification cooldowns
   ├─ ARB_SEEN              {uid: {fp: ts}}        arb fingerprint cooldowns
@@ -19,20 +15,17 @@ State that survives restarts (stored in PTB bot_data via PicklePersistence):
 State that does NOT need persistence (cleared cleanly on restart):
   • _pending_confirms  — trade confirmations expire in 30s; not worth persisting
   • _suggestion/_arb/_key counters — just tick counts; restarting from 0 is fine
-
-Storage file: bot_persistence.pickle (same directory as main.py)
 """
 
-import os
+import asyncio
+import json
 import logging
-from telegram.ext import PicklePersistence
+
+from telegram.ext import BasePersistence, PersistenceInput
+
+from db import get_conn
 
 logger = logging.getLogger(__name__)
-
-try:
-    from config import PERSISTENCE_FILE
-except ImportError:
-    PERSISTENCE_FILE = os.getenv("PERSISTENCE_FILE", "bot_persistence.pickle")
 
 # ── bot_data keys ─────────────────────────────────────────────────────────────
 K_PENDING_INPUT      = "pending_input"       # {uid: {field:..., ...}}
@@ -41,23 +34,155 @@ K_ARB_SEEN           = "arb_seen"            # {uid: {fingerprint: float_ts}}
 K_ARB_SEL            = "arb_sel"             # {uid: [str, ...]}  token picker draft
 
 
-def build_persistence() -> PicklePersistence:
-    """
-    Return a configured PicklePersistence instance.
-    Only bot_data is persisted (user settings live in PostgreSQL; user_data unused).
-    """
-    from telegram.ext._basepersistence import PersistenceInput
+# ── Synchronous DB helpers (run in worker threads via asyncio.to_thread) ──────
 
-    return PicklePersistence(
-        filepath=PERSISTENCE_FILE,
-        store_data=PersistenceInput(
-            bot_data=True,
-            user_data=False,
-            chat_data=False,
-            callback_data=False,
-        ),
-        update_interval=30,   # flush to disk every 30 s
-    )
+def _db_load(key: str, default=None):
+    """Read a JSON blob from the ``bot_state`` table."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT value_json FROM bot_state WHERE key = %s", (key,)
+        ).fetchone()
+    if row is None:
+        return default
+    return json.loads(row["value_json"])
+
+
+def _db_save(key: str, data) -> None:
+    """UPSERT a JSON blob into the ``bot_state`` table."""
+    payload = json.dumps(data, default=str, ensure_ascii=False)
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO bot_state (key, value_json, updated_at)
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO UPDATE SET
+                value_json   = EXCLUDED.value_json,
+                updated_at   = CURRENT_TIMESTAMP
+            """,
+            (key, payload),
+        )
+
+
+# ── Async wrappers (non-blocking for PTB's event loop) ────────────────────────
+
+async def _load(key: str, default=None):
+    try:
+        return await asyncio.to_thread(_db_load, key, default)
+    except Exception as exc:
+        logger.warning("PostgresPersistence load %r failed: %s", key, exc)
+        return default
+
+
+async def _save(key: str, data) -> None:
+    try:
+        await asyncio.to_thread(_db_save, key, data)
+    except Exception as exc:
+        logger.warning("PostgresPersistence save %r failed: %s", key, exc)
+
+
+# ── PostgreSQL-backed PTB persistence ────────────────────────────────────────
+
+class PostgresPersistence(BasePersistence):
+    """PTB ``BasePersistence`` implementation backed by PostgreSQL.
+
+    All state is serialised to JSON and stored in the ``bot_state`` table
+    (created by ``database.init_db()``). Every update is written immediately,
+    so nothing is lost on crash or restart.
+    """
+
+    def __init__(self, update_interval: float = 60):
+        super().__init__(
+            store_data=PersistenceInput(
+                bot_data=True,
+                user_data=False,
+                chat_data=False,
+                callback_data=False,
+            ),
+            update_interval=update_interval,
+        )
+
+    # ── bot_data ───────────────────────────────────────────────────────────
+
+    async def get_bot_data(self) -> dict:
+        data = await _load("bot_data", default={})
+        return data if isinstance(data, dict) else {}
+
+    async def update_bot_data(self, data: dict) -> None:
+        await _save("bot_data", data)
+
+    async def refresh_bot_data(self, bot_data: dict) -> None:
+        return
+
+    # ── user_data / chat_data (interface completeness) ─────────────────────
+
+    async def get_user_data(self) -> dict:
+        data = await _load("user_data", default={})
+        return data if isinstance(data, dict) else {}
+
+    async def update_user_data(self, user_id: int, data: dict) -> None:
+        all_data = await self.get_user_data()
+        all_data[int(user_id)] = data
+        await _save("user_data", all_data)
+
+    async def drop_user_data(self, user_id: int) -> None:
+        all_data = await self.get_user_data()
+        all_data.pop(int(user_id), None)
+        await _save("user_data", all_data)
+
+    async def refresh_user_data(self, user_id: int, user_data: dict) -> None:
+        return
+
+    async def get_chat_data(self) -> dict:
+        data = await _load("chat_data", default={})
+        return data if isinstance(data, dict) else {}
+
+    async def update_chat_data(self, chat_id: int, data: dict) -> None:
+        all_data = await self.get_chat_data()
+        all_data[int(chat_id)] = data
+        await _save("chat_data", all_data)
+
+    async def drop_chat_data(self, chat_id: int) -> None:
+        all_data = await self.get_chat_data()
+        all_data.pop(int(chat_id), None)
+        await _save("chat_data", all_data)
+
+    async def refresh_chat_data(self, chat_id: int, chat_data: dict) -> None:
+        return
+
+    # ── callback_data ──────────────────────────────────────────────────────
+
+    async def get_callback_data(self):
+        data = await _load("callback_data", default=None)
+        return data if isinstance(data, tuple) else None
+
+    async def update_callback_data(self, data) -> None:
+        await _save("callback_data", data)
+
+    # ── conversations ──────────────────────────────────────────────────────
+
+    async def get_conversations(self, name: str) -> dict:
+        data = await _load(f"conversations:{name}", default={})
+        return data if isinstance(data, dict) else {}
+
+    async def update_conversation(self, name: str, key, new_state) -> None:
+        all_data = await self.get_conversations(name)
+        key_repr = repr(tuple(key)) if isinstance(key, (list, tuple)) else str(key)
+        if new_state is None:
+            all_data.pop(key_repr, None)
+        else:
+            all_data[key_repr] = new_state
+        await _save(f"conversations:{name}", all_data)
+
+    # ── flush ──────────────────────────────────────────────────────────────
+
+    async def flush(self) -> None:
+        """Every update is written immediately, so there is nothing to flush."""
+        return
+
+
+def build_persistence() -> PostgresPersistence:
+    """Return a PostgreSQL-backed persistence instance."""
+    return PostgresPersistence(update_interval=60)
 
 
 # ── Typed accessors ───────────────────────────────────────────────────────────
@@ -133,7 +258,7 @@ def restore_in_memory_state(bot_data: dict) -> None:
 def sync_to_bot_data(bot_data: dict) -> None:
     """
     Called periodically by the scheduler to write the live module-level dicts
-    back into bot_data so PicklePersistence can flush them.
+    back into bot_data so PostgresPersistence can persist them.
 
     PENDING_INPUT is synced automatically because we've patched utils.py
     to write through both the dict AND bot_data.  This function handles

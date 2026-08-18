@@ -259,7 +259,6 @@ trading_bot/
 ├── utils.py             Shared decorators (require_granted, require_creds)
 ├── requirements.txt
 ├── .env.example
-├── bot_persistence.pickle  Bot wizard state & cooldowns (PTB PicklePersistence)
 ├── bot.log              General bot log
 ├── trades.log           Dedicated trade activity log
 └── backups/             Daily DB backups (auto-created)
@@ -387,7 +386,6 @@ Get a free SSL cert: `sudo certbot --nginx -d yourdomain.com`
 | `COINMARKETCAP_API_KEY` | No | — | CMC rank and market cap signals (coinmarketcap.com/api, free). |
 | `NEWSAPI_KEY` | No | — | General crypto headlines (newsapi.org, free tier). |
 | `DATABASE_URL` | **Yes** | — | PostgreSQL connection string (required). Example: `postgresql://user:pass@host:5432/duysbot`. |
-| `PERSISTENCE_FILE` | No | `bot_persistence.pickle` | PTB PicklePersistence file for wizard state and cooldowns. |
 | `PAPER_DEFAULT_BALANCE` | No | `1000.0` | Starting paper-trading balance for new users (USDT). |
 
 *Required only if accepting Paystack payments.

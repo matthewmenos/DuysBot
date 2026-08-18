@@ -3,9 +3,9 @@ utils.py - Shared utilities used across handlers and alerts_handlers.
 Kept in a separate module to avoid circular imports.
 
 PENDING_INPUT is now a PersistedDict — every write is mirrored into
-bot_data[K_PENDING_INPUT] so PicklePersistence saves it on its 30-second
-cycle.  This means in-progress multi-step flows (API key entry, settings
-changes, etc.) survive bot restarts.
+bot_data[K_PENDING_INPUT] so PostgresPersistence saves it to PostgreSQL on
+its 60-second cycle.  This means in-progress multi-step flows (API key
+entry, settings changes, etc.) survive bot restarts and Render redeploys.
 """
 
 import html as _html_mod
@@ -77,7 +77,7 @@ def require_creds(func):
 class PersistedDict(dict):
     """
     A dict subclass that mirrors every write/delete into a backing store
-    (bot_data[key]) so PicklePersistence captures it automatically.
+    (bot_data[key]) so PostgresPersistence captures it automatically.
 
     Usage is identical to a plain dict. The backing store is optional;
     if not attached (e.g. during import) the object behaves as a normal dict.

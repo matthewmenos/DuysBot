@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: crypto-trading-bot
+    runtime: python
+    plan: starter  # 1 instance — prevents "Conflict: terminated by other getUpdates" from duplicate polling
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    healthCheckInterval: 30
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: duys-postgres
+          property: connectionString
+      - key: BOT_TOKEN
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_PUBLIC_KEY
+        sync: false
+      - key: PAYSTACK_WEBHOOK_SECRET
+        sync: false
+      - key: BOT_WEBHOOK_URL
+        sync: false
+      - key: TV_WEBHOOK_SECRET_SALT
+        sync: false
+      - key: USDT_APTOS_ADDRESS
+        sync: false
+      - key: USDT_TRON_ADDRESS
+        sync: false
+      - key: USDT_BSC_ADDRESS
+        sync: false
+      - key: TRONGRID_API_KEY
+        sync: false
+      - key: BSCSCAN_API_KEY
+        sync: false
+
+databases:
+  - name: duys-postgres
+    region: omaha
+    plan: starter
