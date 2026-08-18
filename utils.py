@@ -39,11 +39,11 @@ def require_granted(func):
         uid = update.effective_user.id
         if is_admin(uid) or has_active_access(uid):
             return await func(update, context)
-        keyboard = [[InlineKeyboardButton("💳 Subscribe — $12/month", callback_data="subscribe")]]
+        keyboard = [[InlineKeyboardButton("🚀 Subscribe — $12/month", callback_data="subscribe")]]
         await update.effective_message.reply_text(
             "🔒 <b>Access Required</b>\n\n"
             "You need an active subscription to use this bot.\n\n"
-            "  • <b>Pay $12/month</b> via Paystack (card, mobile money, bank transfer)\n"
+            "  • <b>Pay $12/month</b> via USDT crypto (Aptos, TRON, BSC)\n"
             "  • Ask an admin to grant you lifetime access\n\n"
             f"Your Telegram ID: <code>{uid}</code>",
             reply_markup=InlineKeyboardMarkup(keyboard),

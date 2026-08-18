@@ -35,7 +35,6 @@ Keys are stored **encrypted** (Fernet AES-256) in the database. Messages contain
 | Method | Details |
 |---|---|
 | 🆓 Free Trial | 7-day trial, one per account, verified by Telegram ID |
-| 💳 Paystack | Card, mobile money, bank transfer — auto-activates via webhook |
 | 🪙 USDT Crypto | Aptos, TRON (TRC-20), BSC (BEP-20) — verified on-chain |
 | 🔑 Admin Grant | Lifetime access granted by admin |
 | 🔗 Referral | Refer users, earn free months per successful subscription (configurable) |
@@ -49,9 +48,8 @@ Plans are **fully configurable via env vars** — no code changes needed (`PLAN_
 ### Prerequisites
 - Python 3.13+
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- A Paystack account at [paystack.com](https://paystack.com)
 - API keys from at least one exchange
-- A Linux VPS with a public IP (for Paystack webhooks)
+- A Linux VPS with a public IP (for TradingView webhooks)
 
 ### 1. Install
 
@@ -81,20 +79,12 @@ nano .env
 BOT_TOKEN=your_telegram_bot_token
 ADMIN_IDS=your_telegram_user_id
 ENCRYPTION_KEY=your_generated_fernet_key
+DATABASE_URL=postgresql://user:pass@host:5432/duysbot
 
-PAYSTACK_SECRET_KEY=sk_live_...
-PAYSTACK_PUBLIC_KEY=pk_live_...
-PAYSTACK_WEBHOOK_SECRET=your_webhook_secret
 BOT_WEBHOOK_URL=https://yourdomain.com
 ```
 
-### 4. Configure Paystack webhook
-
-In your Paystack dashboard → **Settings → API Keys & Webhooks**:
-- Webhook URL: `https://yourdomain.com/paystack/webhook`
-- Copy the webhook secret to `PAYSTACK_WEBHOOK_SECRET` in `.env`
-
-### 5. Configure crypto wallets (optional)
+### 4. Configure crypto wallets
 
 Set any or all wallet addresses in `.env` to accept USDT payments:
 ```env
@@ -108,13 +98,13 @@ BSCSCAN_API_KEY=your_key      # free at bscscan.com/apis
 
 Networks with no address configured are hidden from the payment menu.
 
-### 6. Run
+### 5. Run
 
 ```bash
 python main.py
 ```
 
-This starts the Telegram bot, the Paystack webhook HTTP server (port 8080), and all background schedulers.
+This starts the Telegram bot, the TradingView webhook HTTP server, and all background schedulers.
 
 ---
 
@@ -206,9 +196,6 @@ User sends /start
            ├─ 🆓 Free Trial (7 days, once per Telegram ID)
            │        └─ Guided onboarding: Exchange → Symbol → TP/SL → Trade Mode
            │
-           ├─ 💳 Paystack (card / mobile money / bank transfer)
-           │        └─ Webhook auto-activates subscription
-           │
            ├─ 🪙 USDT Crypto (Aptos / TRON / BSC)
            │        └─ User pastes TX hash → verified on-chain → activated
            │
@@ -248,9 +235,8 @@ trading_bot/
 ├── handlers.py          All Telegram command and callback handlers
 ├── alerts_handlers.py   Price alert commands (/setalert, /myalerts, /delalert)
 ├── onboarding.py        Guided 4-step setup flow for new users
-├── paystack.py          Paystack API — payment links and verification
 ├── crypto_payment.py    On-chain USDT verification (Aptos, TRON, BSC)
-├── webhook_server.py    HTTP server for Paystack payment webhooks
+├── webhook_server.py    HTTP server for TradingView webhook alerts
 ├── encryption.py        Fernet AES-256 encryption for API keys
 ├── logger_setup.py      Structured logging + admin error reporting
 ├── rate_limiter.py      Per-user command cooldowns and trade deduplication
@@ -297,7 +283,7 @@ sudo systemctl start duysbot
 sudo journalctl -u duysbot -f
 ```
 
-### nginx reverse proxy (for Paystack webhooks)
+### nginx reverse proxy (for TradingView webhooks)
 
 ```nginx
 server {
@@ -307,8 +293,8 @@ server {
     ssl_certificate     /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
 
-    location /paystack/ {
-        proxy_pass         http://127.0.0.1:8080;
+    location /tv/ {
+        proxy_pass         http://127.0.0.1:8081;   # WEBHOOK_PORT + 1
         proxy_set_header   Host $host;
         proxy_set_header   X-Real-IP $remote_addr;
     }
@@ -326,7 +312,6 @@ Get a free SSL cert: `sudo certbot --nginx -d yourdomain.com`
 | API key storage | Fernet AES-256 encrypted in PostgreSQL |
 | DB backups | Encrypted with the same Fernet key — never stored plaintext |
 | API key entry | Messages deleted from chat immediately after input |
-| Paystack webhooks | HMAC-SHA512 signature verified on every event |
 | TradingView webhooks | Per-user HMAC tokens; symbol/amount/exchange validated on every call |
 | Trade scope | Spot only — no leverage, no margin |
 | Per-user keys | No shared credentials between users |
@@ -351,11 +336,8 @@ Get a free SSL cert: `sudo certbot --nginx -d yourdomain.com`
 | `BOT_TOKEN` | **Yes** | — | Telegram bot token from @BotFather. |
 | `ADMIN_IDS` | **Yes** | — | Comma-separated Telegram user IDs with admin access. |
 | `SUPPORT_CHANNEL_ID` | No | — | Private channel/group for support messages (bot must be admin). |
-| `PAYSTACK_SECRET_KEY` | Yes* | — | `sk_live_...` or `sk_test_...` from Paystack dashboard. |
-| `PAYSTACK_PUBLIC_KEY` | Yes* | — | `pk_live_...` or `pk_test_...` from Paystack dashboard. |
-| `PAYSTACK_WEBHOOK_SECRET` | Yes* | — | Webhook signing secret from Paystack dashboard. |
-| `BOT_WEBHOOK_URL` | Yes* | — | Public HTTPS URL of your server (e.g. `https://yourdomain.com`). |
-| `WEBHOOK_PORT` | No | `8080` | Port for Paystack webhook HTTP server. TradingView uses `WEBHOOK_PORT + 1`. |
+| `BOT_WEBHOOK_URL` | No | — | Public HTTPS URL of your server (e.g. `https://yourdomain.com`, used for the web dashboard). |
+| `WEBHOOK_PORT` | No | `8080` | Port for the internal HTTP server. TradingView webhook server uses `WEBHOOK_PORT + 1`. |
 | `PLAN_PRICE_1M` | No | `12.00` | 1-month subscription price (USD). |
 | `PLAN_PRICE_3M` | No | `34.00` | 3-month subscription price (USD). |
 | `PLAN_PRICE_6M` | No | `65.00` | 6-month subscription price (USD). |
@@ -387,5 +369,3 @@ Get a free SSL cert: `sudo certbot --nginx -d yourdomain.com`
 | `NEWSAPI_KEY` | No | — | General crypto headlines (newsapi.org, free tier). |
 | `DATABASE_URL` | **Yes** | — | PostgreSQL connection string (required). Example: `postgresql://user:pass@host:5432/duysbot`. |
 | `PAPER_DEFAULT_BALANCE` | No | `1000.0` | Starting paper-trading balance for new users (USDT). |
-
-*Required only if accepting Paystack payments.

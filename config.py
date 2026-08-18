@@ -52,15 +52,12 @@ GATEIO_API_SECRET     = os.getenv("GATEIO_API_SECRET", "")
 # ── MEXC API key expiry (MEXC keys expire 90 days from creation) ──────────────
 MEXC_KEY_EXPIRY_DAYS = 90
 
-# ── Paystack ──────────────────────────────────────────────────────────────────
-PAYSTACK_SECRET_KEY     = os.getenv("PAYSTACK_SECRET_KEY", "")
-PAYSTACK_PUBLIC_KEY     = os.getenv("PAYSTACK_PUBLIC_KEY", "")
-PAYSTACK_WEBHOOK_SECRET = os.getenv("PAYSTACK_WEBHOOK_SECRET", "")
+# ── Webhooks ──────────────────────────────────────────────────────────────────
 WEBHOOK_PORT            = int(os.getenv("WEBHOOK_PORT", "8080"))
 BOT_WEBHOOK_URL         = os.getenv("BOT_WEBHOOK_URL", "")
 
-# ── Subscription Pricing (USD) ────────────────────────────────────────────────
-# Prices shown to users and charged via Paystack / USDT crypto payments.
+# ── Subscription Pricing (USD / USDT) ─────────────────────────────────────────
+# Prices shown to users and charged via USDT crypto payments.
 # Changing these takes effect immediately — no code change required.
 PLAN_PRICE_1M  = float(os.getenv("PLAN_PRICE_1M",  "12.00"))   # 1-month plan
 PLAN_PRICE_3M  = float(os.getenv("PLAN_PRICE_3M",  "34.00"))   # 3-month plan
@@ -68,9 +65,6 @@ PLAN_PRICE_6M  = float(os.getenv("PLAN_PRICE_6M",  "65.00"))   # 6-month plan
 
 # Keep a dict form for easy lookups (months → price)
 PLAN_PRICES: dict = {1: PLAN_PRICE_1M, 3: PLAN_PRICE_3M, 6: PLAN_PRICE_6M}
-
-# Backward-compat alias used by paystack.py
-SUBSCRIPTION_PRICE_USD = PLAN_PRICE_1M
 
 # ── Crypto Payment — USDT wallet addresses per network ────────────────────────
 # Set each address to YOUR wallet on that network.

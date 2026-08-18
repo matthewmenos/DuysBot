@@ -18,12 +18,6 @@ services:
         sync: false
       - key: ADMIN_IDS
         sync: false
-      - key: PAYSTACK_SECRET_KEY
-        sync: false
-      - key: PAYSTACK_PUBLIC_KEY
-        sync: false
-      - key: PAYSTACK_WEBHOOK_SECRET
-        sync: false
       - key: BOT_WEBHOOK_URL
         sync: false
       - key: TV_WEBHOOK_SECRET_SALT

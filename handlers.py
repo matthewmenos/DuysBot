@@ -21,7 +21,7 @@ from database import (
     get_stored_exchanges, get_exchange_creds, switch_exchange,
     close_trade, init_db,
     has_active_access, get_subscription_status, activate_subscription,
-    record_pending_payment, get_subscription_history, grant_user_lifetime,
+    get_subscription_history, grant_user_lifetime,
     get_all_subscribers, has_used_trial, activate_trial,
     record_crypto_payment, confirm_crypto_payment, get_crypto_payment_history,
     record_mexc_key_saved, get_mexc_key_age_days,
@@ -29,7 +29,6 @@ from database import (
     get_daily_pnl, get_weekly_pnl,
     get_pending_confirmation, resolve_trade_confirmation,
 )
-from paystack import initialize_transaction, verify_transaction
 from crypto_payment import verify_usdt_tx, get_payment_instructions, PLAN_PRICES_USDT
 from config import TRONGRID_API_KEY, BSCSCAN_API_KEY, PLAN_PRICES
 from referral import get_referral_link, get_referral_stats, resolve_start_referral, reward_referrer
@@ -150,24 +149,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data="free_trial"
             )]]
 
-        # Paystack plans
-        keyboard += [
-            [InlineKeyboardButton("── 💳 Pay via Paystack ──────────────", callback_data="noop")],
-            [InlineKeyboardButton("1 Month  $12",          callback_data="pay_1"),
-             InlineKeyboardButton("3 Months $34",          callback_data="pay_3")],
-            [InlineKeyboardButton("6 Months $65 (best)",   callback_data="pay_6")],
-        ]
-
-        # Crypto networks (only configured ones)
+        # Crypto payment networks (only configured ones)
         if active_nets:
-            keyboard += [[InlineKeyboardButton(
-                "── 🪙 Pay via Crypto (USDT) ─────────", callback_data="noop"
-            )]]
             for net_key, net_info in active_nets.items():
                 keyboard += [[InlineKeyboardButton(
                     f"🪙 {net_info['label']} — USDT",
                     callback_data=f"crypto_net_{net_key}"
                 )]]
+        else:
+            keyboard += [[InlineKeyboardButton("🔒 Payments unavailable", callback_data="noop")]]
 
         # ── Build message ─────────────────────────────────────────────────────
         trial_section = ""
@@ -191,7 +181,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"  • 1 Month  — ${_p1:.2f}\n"
             f"  • 3 Months — ${_p3:.2f}  <i>(save ${3*_p1-_p3:.0f})</i>\n"
             f"  • 6 Months — ${_p6:.2f}  <i>(save ${6*_p1-_p6:.0f})</i>\n\n"
-            f"<b>💳 Paystack</b> — Card, Mobile Money, Bank Transfer"
             f"{crypto_line}\n\n"
             f"Your Telegram ID: <code>{user.id}</code>\n"
             f"<i>Share this with an admin for lifetime access.</i>",
@@ -995,23 +984,16 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ]]
 
-    # Section 2: Paystack
-    keyboard += [
-        [InlineKeyboardButton("── 💳 Pay via Paystack ──────────────", callback_data="noop")],
-        [InlineKeyboardButton("1 Month  $12",           callback_data="pay_1"),
-         InlineKeyboardButton("3 Months $34",           callback_data="pay_3")],
-        [InlineKeyboardButton("6 Months $65 (best value)", callback_data="pay_6")],
-    ]
-
-    # Section 3: Crypto — one button per configured network
+    # Crypto networks — one button per configured network
     active_nets = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
     if active_nets:
-        keyboard += [[InlineKeyboardButton("── 🪙 Pay via Crypto (USDT) ─────────", callback_data="noop")]]
         for net_key, net_info in active_nets.items():
             keyboard += [[InlineKeyboardButton(
                 f"🪙 {net_info['label']} — USDT",
                 callback_data=f"crypto_net_{net_key}"
             )]]
+    else:
+        keyboard += [[InlineKeyboardButton("🔒 Payments unavailable", callback_data="noop")]]
 
     trial_section = ""
     if not trial_used:
@@ -1034,7 +1016,6 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  • 1 Month  — ${_p1:.2f}\n"
         f"  • 3 Months — ${_p3:.2f}  <i>(save ${3*_p1-_p3:.0f})</i>\n"
         f"  • 6 Months — ${_p6:.2f}  <i>(save ${6*_p1-_p6:.0f})</i>\n\n"
-        f"<b>💳 Paystack</b> — Card, Mobile Money, Bank Transfer\n"
         f"{crypto_section}\n"
         f"Tap a button to get started:",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1841,7 +1822,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "subscribe":
-        # Show full payment modal: trial (if available) + Paystack + all crypto networks
+        # Show full payment modal: trial (if available) + all crypto networks
         trial_used_cb  = has_used_trial(uid)
         active_nets_cb = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
         full_keyboard  = []
@@ -1852,20 +1833,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data="free_trial"
             )]]
 
-        full_keyboard += [
-            [InlineKeyboardButton("── 💳 Pay via Paystack ──────────────", callback_data="noop")],
-            [InlineKeyboardButton("1 Month  $12",         callback_data="pay_1"),
-             InlineKeyboardButton("3 Months $34",         callback_data="pay_3")],
-            [InlineKeyboardButton("6 Months $65 (best)",  callback_data="pay_6")],
-        ]
-
         if active_nets_cb:
-            full_keyboard += [[InlineKeyboardButton("── 🪙 Pay via Crypto (USDT) ─────────", callback_data="noop")]]
             for net_k, net_v in active_nets_cb.items():
                 full_keyboard += [[InlineKeyboardButton(
                     f"🪙 {net_v['label']} — USDT",
                     callback_data=f"crypto_net_{net_k}"
                 )]]
+        else:
+            full_keyboard += [[InlineKeyboardButton("🔒 Payments unavailable", callback_data="noop")]]
 
         trial_note_cb = f"\n🆓 <b>{FREE_TRIAL_DAYS}-day free trial available!</b>\n" if not trial_used_cb else ""
         crypto_note_cb = f"\n<b>🪙 Crypto:</b> {', '.join(v['label'] for v in active_nets_cb.values())}" if active_nets_cb else ""
@@ -1874,7 +1849,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🤖 <b>CryptoTradeBot — Subscribe / Renew</b>\n"
             f"{trial_note_cb}\n"
             f"<b>Plans:</b> 1mo $12 · 3mo $34 · 6mo $65\n"
-            f"<b>💳 Paystack</b> — Card, Mobile Money, Bank Transfer"
             f"{crypto_note_cb}\n\n"
             f"Choose a payment method:",
             reply_markup=InlineKeyboardMarkup(full_keyboard),
@@ -1882,14 +1856,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data.startswith("pay_"):
-        months = int(data.split("_")[1])
-        amount = PLAN_PRICES.get(months, PLAN_PRICES[1])
-
-        PENDING_INPUT[uid] = {"field": "pay_email", "months": months, "amount": amount}
+        # Legacy plan buttons — route to the USDT crypto network picker.
+        try:
+            months = int(data.split("_")[1])
+        except (IndexError, ValueError):
+            return
+        amount  = PLAN_PRICES.get(months, PLAN_PRICES[1])
+        active_nets = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
+        if not active_nets:
+            await query.message.reply_text(
+                "⚠️ No crypto payment networks are configured. Please contact support.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        keyboard = [[InlineKeyboardButton(
+            f"🪙 {v['label']} — USDT", callback_data=f"crypto_net_{k}"
+        )] for k, v in active_nets.items()]
         await query.message.reply_text(
-            f"💳 <b>{months} Month{'s' if months > 1 else ''} Plan — ${amount:.2f}</b>\n\n"
-            f"Please send your <b>email address</b> so we can generate your payment link.",
-            parse_mode=ParseMode.HTML
+            f"🪙 <b>{months} Month{'s' if months > 1 else ''} Plan — {amount:.2f} USDT</b>\n\n"
+            f"Choose your preferred network:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML,
         )
 
     # ── Paper trading callbacks ───────────────────────────────────────────────
@@ -2561,7 +2548,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_nets = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
         if not active_nets:
             await query.message.reply_text(
-                "⚠️ Crypto payment is not configured yet. Please use Paystack instead.",
+                "⚠️ Crypto payment is not configured yet. Please contact support.",
                 parse_mode=ParseMode.HTML
             )
             return
@@ -2907,37 +2894,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ <b>Payment Not Verified</b>\n\n"
                 f"{result['error']}\n\n"
                 f"Send your transaction hash again once resolved:",
-                parse_mode=ParseMode.HTML
-            )
-
-    elif field == "pay_email":
-        email  = text.strip()
-        months = pi.get("months", 1)
-        amount = pi.get("amount", 12.00)
-        if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-            await update.effective_message.reply_text("❌ That doesn't look like a valid email. Please try again.")
-            return
-
-        await update.effective_message.reply_text("⏳ Generating your payment link...")
-        result = initialize_transaction(uid, email, months)
-        del PENDING_INPUT[uid]
-
-        if result["ok"]:
-            record_pending_payment(uid, result["reference"], months, amount, "USD")
-            keyboard = [[InlineKeyboardButton("💳 Pay Now", url=result["authorization_url"])]]
-            await update.effective_message.reply_text(
-                f"✅ <b>Payment Link Ready!</b>\n\n"
-                f"Plan:   <code>{months} month{'s' if months > 1 else ''}</code>\n"
-                f"Amount: <code>${amount:.2f} USD</code>\n\n"
-                f"Tap the button below to pay securely via Paystack.\n"
-                f"Your subscription activates automatically once payment is confirmed.\n\n"
-                f"Ref: <code>{result['reference']}</code>",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            await update.effective_message.reply_text(
-                f"❌ Could not generate payment link:\n<code>{result['message']}</code>\n\nPlease try /subscribe again.",
                 parse_mode=ParseMode.HTML
             )
 

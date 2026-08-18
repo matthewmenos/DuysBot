@@ -207,14 +207,11 @@ def main():
     # Start scheduler for auto-trading
     app.job_queue.run_repeating(start_scheduler, interval=60, first=10)
 
-    # Start Paystack webhook server in background
-    from webhook_server import run_webhook_server, run_tv_webhook_server, TVWebhookHandler
+    # Start TradingView webhook server in background (port WEBHOOK_PORT + 1)
+    from webhook_server import run_tv_webhook_server, TVWebhookHandler
     from web_app import run_web_app
     from threading import Thread
 
-    Thread(target=run_webhook_server, daemon=True).start()
-
-    # TradingView webhook server (Paystack port + 1)
     tv_thread = Thread(target=run_tv_webhook_server, daemon=True)
     tv_thread.start()
 

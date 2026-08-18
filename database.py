@@ -811,23 +811,6 @@ def activate_subscription(user_id: int, months: int) -> str:
     return expiry_str[:10]
 
 
-def record_pending_payment(user_id: int, reference: str, months: int, amount: float, currency: str):
-    with get_conn() as conn:
-        conn.execute("""
-            INSERT OR IGNORE INTO subscriptions (user_id, reference, months, amount, currency, status)
-            VALUES (?, ?, ?, ?, ?, 'pending')
-        """, (user_id, reference, months, amount, currency))
-
-
-def confirm_payment(reference: str, expiry: str):
-    with get_conn() as conn:
-        conn.execute("""
-            UPDATE subscriptions
-            SET status='success', paid_at=CURRENT_TIMESTAMP, expiry=?
-            WHERE reference=?
-        """, (expiry, reference))
-
-
 def get_subscription_history(user_id: int):
     with get_conn() as conn:
         return conn.execute("""

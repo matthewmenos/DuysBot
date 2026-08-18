@@ -828,7 +828,6 @@ async def send_renewal_reminders(context):
             from config import CRYPTO_NETWORKS, FREE_TRIAL_DAYS
             active_nets = {k: v for k, v in CRYPTO_NETWORKS.items() if v.get("address")}
             renew_keyboard = [
-                [InlineKeyboardButton("── 💳 Renew via Paystack ─────────────", callback_data="noop")],
                 [InlineKeyboardButton("1 Month  $12",        callback_data="pay_1"),
                  InlineKeyboardButton("3 Months $34",        callback_data="pay_3")],
                 [InlineKeyboardButton("6 Months $65 (best)", callback_data="pay_6")],
