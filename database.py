@@ -423,9 +423,9 @@ def upsert_user(user_id: int, username: str = "", granted: int = 0, is_admin: in
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO users (user_id, username, granted, is_admin)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT(user_id) DO UPDATE SET username=excluded.username
-        """, (user_id, username, granted, is_admin))
+        """, (int(user_id), str(username), int(granted), int(is_admin)))
 
 
 def grant_user(user_id: int):
