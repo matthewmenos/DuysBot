@@ -48,7 +48,7 @@ def init_db():
     with get_conn() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id             INTEGER PRIMARY KEY,
+            user_id             BIGINT PRIMARY KEY,
             username            TEXT,
             granted             INTEGER DEFAULT 0,
             is_admin            INTEGER DEFAULT 0,
@@ -65,7 +65,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS crypto_payments (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id       INTEGER NOT NULL,
+            user_id       BIGINT NOT NULL,
             tx_hash       TEXT UNIQUE,
             amount_usdt   REAL,
             months        INTEGER DEFAULT 1,
@@ -78,7 +78,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS subscriptions (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     INTEGER,
+            user_id     BIGINT,
             reference   TEXT UNIQUE,
             months      INTEGER DEFAULT 1,
             amount      REAL,
@@ -93,7 +93,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS trades (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id       INTEGER,
+            user_id       BIGINT,
             symbol        TEXT,
             side          TEXT,
             entry_price   REAL,
@@ -112,14 +112,14 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS support_messages (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER,
+            user_id    BIGINT,
             message    TEXT,
             sent_at    TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS trade_confirmations (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     INTEGER,
+            user_id     BIGINT,
             symbol      TEXT,
             side        TEXT,
             price       REAL,
@@ -131,15 +131,15 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS referrals (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            referrer_id  INTEGER NOT NULL,
-            referred_id  INTEGER NOT NULL UNIQUE,
+            referrer_id  BIGINT NOT NULL,
+            referred_id  BIGINT NOT NULL UNIQUE,
             code         TEXT NOT NULL,
             rewarded     INTEGER DEFAULT 0,
             created_at   TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS user_settings (
-            user_id              INTEGER PRIMARY KEY,
+            user_id              BIGINT PRIMARY KEY,
             take_profit          REAL    DEFAULT 2.0,
             stop_loss            REAL    DEFAULT 1.0,
             tp_mode              TEXT    DEFAULT 'pct',
@@ -162,7 +162,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS exchange_creds (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER NOT NULL,
+            user_id    BIGINT NOT NULL,
             exchange   TEXT NOT NULL,
             api_key    TEXT NOT NULL,
             api_secret TEXT NOT NULL,
@@ -174,7 +174,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS paper_trades (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id       INTEGER,
+            user_id       BIGINT,
             symbol        TEXT,
             side          TEXT,
             entry_price   REAL,
@@ -190,7 +190,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS webhook_logs (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER,
+            user_id    BIGINT,
             token      TEXT,
             payload    TEXT,
             action     TEXT,
@@ -202,7 +202,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS dca_plans (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id         INTEGER,
+            user_id         BIGINT,
             exchange_id     TEXT,
             symbol          TEXT,
             amount_usdt     REAL,
@@ -218,7 +218,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS grid_plans (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id      INTEGER,
+            user_id      BIGINT,
             exchange_id  TEXT,
             symbol       TEXT,
             lower_price  REAL,
@@ -244,7 +244,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS smart_orders (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     INTEGER,
+            user_id     BIGINT,
             exchange_id TEXT,
             type        TEXT,
             symbol      TEXT,
@@ -269,7 +269,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS strategies (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id          INTEGER,
+            user_id          BIGINT,
             name             TEXT,
             description      TEXT,
             symbol           TEXT,
@@ -287,7 +287,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS strategy_subscriptions (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            subscriber_id   INTEGER,
+            subscriber_id   BIGINT,
             strategy_id     INTEGER,
             prev_settings   TEXT,
             subscribed_at   TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -296,7 +296,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS audit_log (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER,
+            user_id    BIGINT,
             event_type TEXT,
             details    TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -304,14 +304,14 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS webdash_tokens (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER,
+            user_id    BIGINT,
             token      TEXT UNIQUE,
             expires_at TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS price_alerts (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id      INTEGER,
+            user_id      BIGINT,
             symbol       TEXT,
             target_price REAL,
             condition    TEXT DEFAULT 'above',  -- 'above' or 'below'
@@ -322,8 +322,36 @@ def init_db():
         );
         """)
 
-        # ── Migrate existing databases — add columns added in later versions ──
+                # ── Migrate existing databases — add columns added in later versions ──
         migrations = [
+            # ── Type migration: change user_id / referrer_id / referred_id /
+            #    subscriber_id columns from INTEGER (32-bit, max 2.1B) to BIGINT
+            #    (64-bit) to accommodate Telegram user IDs that exceed 2,147,483,647.
+            #    Each statement is wrapped in try/except by the migration loop below,
+            #    so failures (e.g. table doesn't exist yet) are safely ignored. ──
+            "ALTER TABLE users ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE crypto_payments ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE subscriptions ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE trades ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE support_messages ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE trade_confirmations ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE referrals ALTER COLUMN referrer_id TYPE BIGINT",
+            "ALTER TABLE referrals ALTER COLUMN referred_id TYPE BIGINT",
+            "ALTER TABLE user_settings ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE exchange_creds ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE paper_trades ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE webhook_logs ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE dca_plans ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE grid_plans ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE smart_orders ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE strategies ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE strategy_subscriptions ALTER COLUMN subscriber_id TYPE BIGINT",
+            "ALTER TABLE audit_log ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE webdash_tokens ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE price_alerts ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE signal_history ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE onboarding_state ALTER COLUMN user_id TYPE BIGINT",
+            "ALTER TABLE referral_codes ALTER COLUMN user_id TYPE BIGINT",
             "ALTER TABLE users ADD COLUMN trial_used INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN trial_started_at TEXT DEFAULT NULL",
             "ALTER TABLE users ADD COLUMN mexc_key_saved_at TEXT DEFAULT NULL",
@@ -352,7 +380,7 @@ def init_db():
             "ALTER TABLE trades ADD COLUMN close_reason TEXT",
             """CREATE TABLE IF NOT EXISTS signal_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id           INTEGER NOT NULL,
+                user_id           BIGINT NOT NULL,
                 symbol            TEXT,
                 action            TEXT,
                 confidence        INTEGER,
@@ -362,13 +390,13 @@ def init_db():
                 created_at        TEXT    DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS onboarding_state (
-                user_id   INTEGER PRIMARY KEY,
+                user_id   BIGINT PRIMARY KEY,
                 step      TEXT DEFAULT 'exchange',
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS crypto_payments (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id       INTEGER NOT NULL,
+                user_id       BIGINT NOT NULL,
                 tx_hash       TEXT UNIQUE,
                 amount_usdt   REAL,
                 months        INTEGER DEFAULT 1,

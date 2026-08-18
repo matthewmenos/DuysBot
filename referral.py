@@ -49,17 +49,20 @@ def _ensure_referral_tables():
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS referrals (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            referrer_id  INTEGER NOT NULL,
-            referred_id  INTEGER NOT NULL UNIQUE,
+            referrer_id  BIGINT NOT NULL,
+            referred_id  BIGINT NOT NULL UNIQUE,
             code         TEXT NOT NULL,
             rewarded     INTEGER DEFAULT 0,
             created_at   TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS referral_codes (
-            user_id  INTEGER PRIMARY KEY,
+            user_id  BIGINT PRIMARY KEY,
             code     TEXT NOT NULL UNIQUE,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        ALTER TABLE referrals ALTER COLUMN referrer_id TYPE BIGINT;
+        ALTER TABLE referrals ALTER COLUMN referred_id TYPE BIGINT;
+        ALTER TABLE referral_codes ALTER COLUMN user_id TYPE BIGINT;
         """)
 
 
